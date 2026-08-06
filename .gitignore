@@ -1,0 +1,25 @@
+# Vercel deployment state
+.vercel/
+
+# Backup files (not part of the deployed site)
+__fix1.ps1
+__fix2.ps1
+fuego-avatar.backup-pre-distributed-fire.html
+fuego-avatar copy.html
+fuego-back.html
+fuego.html
+test-rig.html
+body.glb
+
+# Editor / OS
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# motion_latest.json is INTENTIONALLY tracked — the deployed site loads it.
+# If you want to gitignore it later, just add it back here.
