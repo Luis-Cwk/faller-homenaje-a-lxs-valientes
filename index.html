@@ -54,7 +54,7 @@
 
   <script type="module">
 
-    import * as THREE from 'three/webgpu';
+
     import {
       vec3, vec4, uvec3, float, Fn, uniform,
       texture3D, textureStore, instanceIndex,
@@ -141,6 +141,8 @@
     let emberGroup = null;
     let emberPoints = null;
     let emberMat = null;
+    // Reusable scratch for embers + emitter (declared early to avoid TDZ)
+    const _emitterTmp = new THREE.Vector3();
 
     // sim textures
     let velTexA, velTexB; // velocity field (xyz)
@@ -1913,8 +1915,6 @@
     let lastTime = performance.now();
     let simAccumulator = 0;
 
-    // Reusable scratch state for updateEmitterFromAvatars (avoid GC churn in hot loop)
-    const _emitterTmp = new THREE.Vector3();
 
     // ──────────────────────────────────────────────────────────────────────
     // updateEmitterFromAvatars(delta)
