@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+﻿﻿<!DOCTYPE html>
 <html lang="en">
 
 <head>
@@ -60,8 +60,8 @@
       texture3D, textureStore, instanceIndex,
       screenCoordinate, pass,
       smoothstep, mix, min, max, floor,
-      mx_noise_float, mx_worley_noise_float, storage, storageTexture, If, cameraPosition, hue,
-      Loop, positionWorld, positionLocal, screenUV, time, color, vec2, objectPosition, viewportSharedTexture,
+      mx_noise_float, storage, storageTexture, If, cameraPosition, hue,
+      Loop, positionWorld, positionLocal,
       interleavedGradientNoise, frameId, fract,
       saturation, cos, sin, atan
     } from 'three/tsl';
@@ -218,11 +218,6 @@
     const AVATAR_BONE_RADIUS = 0.045;
     const ENSEMBLE_RADIUS = 1.6;     // metres around the teapot anchor
     const AVATAR_VERTICAL_OFFSET = 0.0;
-    // World-Y of the water surface and the top of the platform.
-    // The platform's top sits exactly at the water level, and the avatars
-    // stand on the platform. Calculated from VOLUME_WORLD_SIZE_Y so it stays
-    // in sync with the rest of the fire-volume geometry.
-    const PLATFORM_TOP_Y = - VOLUME_WORLD_SIZE_Y / 2 + 0.4 + VOLUME_WORLD_SIZE_Y / 2 + 0.4;
 
     // Shared geometries/mats â€” one allocation for all avatars (perf)
     let avatarSharedJointGeo = null;
@@ -316,11 +311,9 @@
       avatarEnsembleParent = new THREE.Group();
       avatarEnsembleParent.name = 'avatarEnsemble';
       // Anchor at the teapot's world position (kept in sync with uTeapotPosition),
-      // then lift so the avatar's feet sit on the platform top (WATER_SURFACE_Y).
-      // Original was +2.5m (mid-air inside the fire volume). New: a small +0.2m
-      // so MediaPipe-style coords (which sit slightly below their origin) put
-      // the feet near the platform and the head inside the fire volume above.
-      avatarEnsembleParent.position.set(avatarWorldAnchor.x, PLATFORM_TOP_Y + 0.2, avatarWorldAnchor.z);
+      // then lift +2.5m so MediaPipe-style coords (which sit slightly below their origin)
+      // put the feet near the floor and the head around y â‰ˆ 6 (inside the fire volume).
+      avatarEnsembleParent.position.set(avatarWorldAnchor.x, avatarWorldAnchor.y + 2.5, avatarWorldAnchor.z);
       sceneRef.add(avatarEnsembleParent);
 
       const n = Math.max(1, count | 0);
@@ -1036,9 +1029,7 @@
       document.body.appendChild(renderer.domElement);
 
       scene = new THREE.Scene();
-      // ── Atmosphere: blue gradient sky (adapted from webgpu_backdrop_water) ──
-      scene.background = new THREE.Color(0x0487e2);
-      scene.fog = new THREE.Fog(0x0487e2, 8, 28);
+      scene.background = new THREE.Color(0x000000);
 
       camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
       camera.position.set(14, 5.5, 4.4);
@@ -1279,55 +1270,13 @@
       volumetricShadowMesh.castShadow = true;
       scene.add(volumetricShadowMesh);
 
-      // ──────────────────────────────────────────────────────────────────
-      //  Atmosphere: water surface + platform (ADDITIVE — original floor
-      //  removed; original geometry was a 80×80 dark plane, no params/GUI
-      //  depended on it. Adapted from three.js webgpu_backdrop_water.)
-      // ──────────────────────────────────────────────────────────────────
-      const PLATFORM_HEIGHT = 0.4;
-      const PLATFORM_CENTER_Y = PLATFORM_TOP_Y - PLATFORM_HEIGHT / 2;
-      const WATER_SURFACE_Y = PLATFORM_TOP_Y;
+      // Floor
 
-      // Water — procedural worley noise shader (animated surface)
-      const waterMat = new THREE.MeshBasicNodeMaterial();
-      const waterTime = time.mul(0.8);
-      const waterUV = positionWorld.xzy;
-      const waterLayer0 = mx_worley_noise_float(waterUV.mul(4).add(waterTime));
-      const waterLayer1 = mx_worley_noise_float(waterUV.mul(2).add(waterTime));
-      const waterIntensity = waterLayer0.mul(waterLayer1);
-      const waterColor = waterIntensity.mul(1.4).mix(color(0x0487e2), color(0x74ccf4));
-      waterMat.colorNode = waterColor;
-      waterMat.transparent = true;
-      const water = new THREE.Mesh(new THREE.BoxGeometry(50, 0.001, 50), waterMat);
-      water.position.y = WATER_SURFACE_Y;
-      scene.add(water);
-
-      // Platform — circular cylinder where the avatars stand
-      const platform = new THREE.Mesh(
-        new THREE.CylinderGeometry(1.6, 1.8, PLATFORM_HEIGHT, 48, 1, false),
-        new THREE.MeshStandardMaterial({
-          color: 0x2a3f55, roughness: 0.55, metalness: 0.35,
-          emissive: 0x0a1a2a, emissiveIntensity: 0.3
-        })
-      );
-      platform.position.y = PLATFORM_CENTER_Y;
-      platform.receiveShadow = true;
-      platform.castShadow = false;
-      scene.add(platform);
-
-      // Subtle rim under the water surface (so the platform reads as emerging from water)
-      const platformRim = new THREE.Mesh(
-        new THREE.TorusGeometry(1.65, 0.06, 12, 64),
-        new THREE.MeshStandardMaterial({
-          color: 0x88ccff, emissive: 0x4488cc, emissiveIntensity: 1.2,
-          roughness: 0.3, metalness: 0.6
-        })
-      );
-      platformRim.rotation.x = -Math.PI / 2;
-      platformRim.position.y = WATER_SURFACE_Y - 0.05;
-      scene.add(platformRim);
-
-      // Original floor removed; avatars will sit on the platform top (see teapot.position below).
+      const floorPlane = new THREE.Mesh(new THREE.PlaneGeometry(80, 80), new THREE.MeshStandardMaterial({ color: 0x111115, roughness: 0.8 }));
+      floorPlane.rotation.x = - Math.PI / 2;
+      floorPlane.position.y = - VOLUME_WORLD_SIZE_Y / 2 + 0.4 + VOLUME_WORLD_SIZE_Y / 2 + 0.4;
+      floorPlane.receiveShadow = true;
+      scene.add(floorPlane);
 
       // Teapot - opaque object inside the smoke, to visualize volumetric transparency / occlusion.
       // We *keep* teapot entirely inside the volumetric smoke (so the wind/density/uTeapotPosition
@@ -1338,7 +1287,7 @@
         new THREE.MeshStandardMaterial({ color: 0x000000, roughness: 1.0, metalness: 1.0 })
       );
       teapot.receiveShadow = true;
-      teapot.position.set(0, PLATFORM_TOP_Y - teapotMinY, 0);
+      teapot.position.set(0, floorPlane.position.y - teapotMinY, 0);
       teapot.visible = false;            // â† hidden: ensemble takes the visual stage
       scene.add(teapot);
 

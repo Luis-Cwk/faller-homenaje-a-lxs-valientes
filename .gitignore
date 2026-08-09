@@ -23,4 +23,3 @@ npm-debug.log*
 
 # motion_latest.json is INTENTIONALLY tracked — the deployed site loads it.
 # If you want to gitignore it later, just add it back here.
-.vercel
