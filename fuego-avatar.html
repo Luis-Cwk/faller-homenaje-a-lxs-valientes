@@ -41,8 +41,6 @@
 
 <body>
 
-  <button id="audio-toggle" style="position:fixed;top:16px;right:16px;z-index:10;padding:8px 14px;font:600 13px/1 system-ui,sans-serif;background:rgba(0,0,0,0.55);color:#fff;border:1px solid rgba(255,255,255,0.25);border-radius:6px;cursor:pointer;backdrop-filter:blur(6px);">🔊 sound off</button>
-
   <script type="importmap">
 			{
 				"imports": {
@@ -1883,6 +1881,16 @@
 
       });
 
+      // Audio folder — Tim Hecker inspired drone + arpeggio
+      const audioFolder = gui.addFolder('Audio');
+      import('./audio.js').then(({ toggleAudio }) => {
+        const audioCtl = { on: false };
+        audioFolder.add(audioCtl, 'on').name('Sound On/Off').onChange(async () => {
+          const playing = await toggleAudio();
+          audioCtl.on = playing;
+        });
+      });
+
       window.addEventListener('resize', onWindowResize);
 
       // Run the resize handler once after init so the canvas drawing buffer
@@ -2168,15 +2176,6 @@
 
     // Kick everything off now that every `let`/`const` in this module is initialised.
     init();
-
-    // Audio toggle (Tim Hecker inspired drone + arpegio)
-    import('./audio.js').then(({ toggleAudio, isPlaying }) => {
-      const btn = document.getElementById('audio-toggle');
-      btn.addEventListener('click', async () => {
-        const playing = await toggleAudio();
-        btn.textContent = playing ? '🔊 sound on' : '🔇 sound off';
-      });
-    });
 
   </script>
 
