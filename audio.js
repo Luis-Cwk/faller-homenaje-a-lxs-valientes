@@ -1,20 +1,22 @@
 // audio.js — Tim Hecker inspired generative drone + arpeggio for faller
+// Uses window.Tone global (loaded via classic <script> in index.html),
+// matching the pattern used in the other 00-simplest projects.
+//
 // Drone: 3 detuned saws + sine sub -> distortion -> lowpass (LFO) -> reverb
 // Arpeggio: random pentatonic notes every 4-8s -> reverb
 // Master: low volume + limiter
 
-import Tone from 'tone';
+const Tone = window.Tone;
 const {
   Volume, Limiter, Reverb, Filter, LFO, Distortion, Gain, Oscillator,
   PolySynth, Synth, Loop, Frequency, getTransport, start
 } = Tone;
 
 let started = false;
-let masterVolume, limiter;
 
 function buildAudioGraph() {
-  masterVolume = new Volume(-18).toDestination();
-  limiter = new Limiter(-3).connect(masterVolume);
+  const masterVolume = new Volume(-18).toDestination();
+  const limiter = new Limiter(-3).connect(masterVolume);
 
   const reverb = new Reverb({
     decay: 18,
@@ -22,7 +24,8 @@ function buildAudioGraph() {
     wet: 0.85
   });
   reverb.connect(limiter);
-  // Reverb generates its impulse response async — wait for it before playing.
+  // Reverb generates its impulse response async — kick it off now so it's ready
+  // by the time transport starts.
   reverb.generate();
 
   // Drone cluster — 3 detuned saw oscillators + sine sub
