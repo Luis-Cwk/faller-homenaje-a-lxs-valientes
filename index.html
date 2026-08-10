@@ -1708,6 +1708,12 @@
 
       const gui = renderer.inspector.createParameters('Fire Simulation');
 
+      // Open the Inspector by default and show the Parameters tab so all
+      // controls are visible without the user having to press 'i'.
+      renderer.inspector.show();
+      renderer.inspector.setVisible(true);
+      renderer.inspector.setActiveTab(renderer.inspector.parameters);
+
       gui.add(params, 'simulate').name('Simulate Fluid');
       gui.add(params, 'simSpeed', 0.0, 2.0, 0.01).name('Simulation Speed');
       gui.add(params, 'resolution', .1, 1).name('Render Resolution').onChange((resolution) => {
