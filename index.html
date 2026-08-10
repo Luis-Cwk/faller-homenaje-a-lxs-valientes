@@ -569,7 +569,7 @@
           target.visible = true;
           target.position.set(base.x * scale, base.y * scale, base.z * scale);
 
-          const s = 0.5 + vis * 1.5;
+          const s = (0.5 + vis * 1.5) * (params.avatarBoneThickness ?? 1.0);
           target.scale.set(s, s, s);
           target.material.opacity = Math.max(0.25, vis);
         }
