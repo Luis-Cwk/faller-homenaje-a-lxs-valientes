@@ -1708,10 +1708,9 @@
 
       const gui = renderer.inspector.createParameters('Fire Simulation');
 
-      // Open the Inspector by default and show the Parameters tab so all
-      // controls are visible without the user having to press 'i'.
-      renderer.inspector.show();
-      renderer.inspector.setVisible(true);
+      // Switch to the Parameters tab by default so the controls are visible
+      // without the user having to press 'i'. (Calling inspector.show() here
+      // throws because the profiler's builtinButton isn't initialised yet.)
       renderer.inspector.setActiveTab(renderer.inspector.parameters);
 
       gui.add(params, 'simulate').name('Simulate Fluid');
