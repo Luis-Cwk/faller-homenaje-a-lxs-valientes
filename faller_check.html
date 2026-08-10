@@ -1818,7 +1818,7 @@
       avatarFolder.add(params, 'avatarVisible').name('Visible').onChange(v => {
         for (const inst of avatarInstances) inst.root.visible = v;
       });
-      avatarFolder.add(params, 'avatarCount', 1, 9, 1).name('Ensemble Size').onChange(() => buildAvatarEnsemble(params.avatarCount));
+      avatarFolder.add(params, 'avatarCount', 1, 15, 1).name('Ensemble Size').onChange(() => buildAvatarEnsemble(params.avatarCount));
       avatarFolder.add(params, 'avatarScale', 0.4, 2.0, 0.05).name('Joint Scale');
       avatarFolder.add(params, 'avatarBoneThickness', 0.3, 2.5, 0.05).name('Bone Thickness (slimness)');
       avatarFolder.add(params, 'avatarFire').name('Burning Bodies');
@@ -2025,6 +2025,10 @@
     function animate() {
 
       const currentTime = performance.now();
+
+      // ── Throttle to a fixed 30fps: skip this frame if less than ~33.33ms elapsed ──
+      const TARGET_FRAME_MS = 1000 / 30;
+      if (lastTime > 0 && (currentTime - lastTime) < TARGET_FRAME_MS) return;
       const delta = Math.min((currentTime - lastTime) * 0.001, 1 / 30);
       lastTime = currentTime;
 
