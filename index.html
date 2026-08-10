@@ -612,8 +612,8 @@
           } else if ((s === 13 && e === 15) || (s === 14 && e === 16)) {
             thickness = 1.1; // forearms (was 1.4)
           }
-          bone.scale.x = thickness;
-          bone.scale.z = thickness;
+          bone.scale.x = thickness * (params.avatarBoneThickness ?? 1.0);
+          bone.scale.z = thickness * (params.avatarBoneThickness ?? 1.0);
 
           // Orient cylinder +Y along the bone direction.
           //
@@ -1660,6 +1660,7 @@
         avatarVisible: true,
         avatarCount: 5,
         avatarScale: 1.0,
+        avatarBoneThickness: 1.0,
         avatarFire: true,
         avatarFireIntensity: 1.2,
         fireStartColor: '#ffe68c',
@@ -1819,6 +1820,7 @@
       });
       avatarFolder.add(params, 'avatarCount', 1, 9, 1).name('Ensemble Size').onChange(() => buildAvatarEnsemble(params.avatarCount));
       avatarFolder.add(params, 'avatarScale', 0.4, 2.0, 0.05).name('Joint Scale');
+      avatarFolder.add(params, 'avatarBoneThickness', 0.3, 2.5, 0.05).name('Bone Thickness (slimness)');
       avatarFolder.add(params, 'avatarFire').name('Burning Bodies');
       avatarFolder.add(params, 'avatarFireIntensity', 0.0, 3.0, 0.05).name('Fire Intensity');
 
