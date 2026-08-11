@@ -1376,13 +1376,13 @@
       // ensemble so the dancers never leave the frame, no matter how the
       // user rotates. Pan is disabled to keep the framing fixed.
       controls = new OrbitControls(camera, renderer.domElement);
-      controls.target.set(0, 2.6, 0); // centre of the dancers (avatarWorldAnchor.y + 2.5 ≈ 2.5, +0.1 for chest height)
+      controls.target.set(0, 2.9, 0); // centre of the dancers (avatarWorldAnchor.y + 2.5 ≈ 2.5, +0.1 for chest height)
       controls.enableDamping = true;
       controls.dampingFactor = 0.06;
       controls.enablePan = false;
-      controls.minDistance = 10;
-      controls.maxDistance = 14;
-      controls.maxPolarAngle = Math.PI * 0.48; // stay above ground
+      controls.minDistance = 1;
+      controls.maxDistance = 10;
+      controls.maxPolarAngle = Math.PI * params.cameraPolarMax; // 0 = straight down, 0.6 = gentle horizon
       controls.update();
 
       createForest();
@@ -1890,7 +1890,8 @@
         vignette: 0.6,
         windBias: 0.4,
         windBiasAngle: 0,  // radians from +X axis
-        scatteringEnabled: true
+        scatteringEnabled: true,
+        cameraPolarMax: 0.48  // multiplier on Math.PI for controls.maxPolarAngle (0 = nadir, 1 = horizon)
       };
 
       // â”€â”€ Build the avatar ensemble now that `params` exists â”€â”€
@@ -2093,6 +2094,18 @@
       sceneLights.add(uPointLightProjectionFrequency, 'value', 0.1, 1.0, 0.01).name('Proj Light Freq');
       sceneLights.add(uPointLightProjectionNoiseFade, 'value', 1.0, 30.0, 0.1).name('Proj Noise Fade Dist');
       sceneLights.add(uPointLightProjectionCenterFade, 'value', 0.1, 5.0, 0.05).name('Proj Center Fade');
+
+      // Camera Folder — polar angle (how far down the camera can look) and
+      // zoom range. Multiplying Math.PI by cameraPolarMax gives a clean UI
+      // range: 0 = camera locked at the zenith, 1 = camera free to the horizon.
+      const cameraFolder = gui.addFolder('Camera');
+      cameraFolder.add(params, 'cameraPolarMax', 0.0, 0.6, 0.01).name('Max Polar Angle (×π)').onChange(() => {
+        if (controls) {
+          controls.maxPolarAngle = Math.PI * params.cameraPolarMax;
+          controls.update();
+        }
+      });
+      cameraFolder.add(params, 'cameraPolarMax', 0.0, 0.6, 0.01); // second pass for safety
 
       // Tone Mapping & Exposure Folder
       const toneMappingOptions = {
