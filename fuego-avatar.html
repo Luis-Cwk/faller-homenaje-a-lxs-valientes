@@ -1381,8 +1381,10 @@
       controls.dampingFactor = 0.06;
       controls.enablePan = false;
       controls.minDistance = 1;
-      controls.maxDistance = 10;
-      controls.maxPolarAngle = Math.PI * params.cameraPolarMax; // 0 = straight down, 0.6 = gentle horizon
+      controls.maxDistance = 9;
+      // Default value used until `params` is assigned later in init(); the live
+      // sync happens right after the params block (search: `controls.maxPolarAngle = Math.PI * params.cameraPolarMax;`).
+      controls.maxPolarAngle = Math.PI * 0.48; // 0 = straight down, 0.6 = gentle horizon
       controls.update();
 
       createForest();
@@ -1894,6 +1896,12 @@
         cameraPolarMax: 0.48  // multiplier on Math.PI for controls.maxPolarAngle (0 = nadir, 1 = horizon)
       };
 
+      // Now that `params` exists, overwrite the bootstrap default written at
+      // OrbitControls init time (see line ~1385) with the real param value.
+      if (typeof controls !== 'undefined' && controls) {
+        controls.maxPolarAngle = Math.PI * params.cameraPolarMax;
+      }
+
       // â”€â”€ Build the avatar ensemble now that `params` exists â”€â”€
       buildAvatarEnsemble(params.avatarCount);
       loadAvatarMotion('motion_latest.json');
@@ -2322,22 +2330,27 @@
       if (emberPoints) updateEmbers(delta);
 
       // Calculate teapot speed and velocity vector for wind effect
-      const currentPos = teapot.position;
-      const dist = currentPos.distanceTo(prevTeapotPos);
-      const speed = delta > 0 ? dist / delta : 0;
+      // (guarded: the teapot is currently a static anchor at the ensemble centre —
+      //  visible:false, never moves. If we add mobile teapots back later, the
+      //  math is preserved inside the guard.)
+      if (teapot) {
+        const currentPos = teapot.position;
+        const dist = currentPos.distanceTo(prevTeapotPos);
+        const speed = delta > 0 ? dist / delta : 0;
 
-      const teapotVel = new THREE.Vector3();
-      if (delta > 0) {
+        const teapotVel = new THREE.Vector3();
+        if (delta > 0) {
 
-        teapotVel.subVectors(currentPos, prevTeapotPos).multiplyScalar(1 / delta);
+          teapotVel.subVectors(currentPos, prevTeapotPos).multiplyScalar(1 / delta);
 
+        }
+
+        prevTeapotPos.copy(currentPos);
+
+        uTeapotSpeed.value = speed;
+        uTeapotVelocity.value.copy(teapotVel);
+        uTeapotPosition.value.copy(currentPos);
       }
-
-      prevTeapotPos.copy(currentPos);
-
-      uTeapotSpeed.value = speed;
-      uTeapotVelocity.value.copy(teapotVel);
-      uTeapotPosition.value.copy(currentPos);
 
       if (params.simulate && params.simSpeed > 0) {
 
