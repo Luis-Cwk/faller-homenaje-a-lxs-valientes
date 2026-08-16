@@ -1409,12 +1409,26 @@ function createAvatarInstance() {
           console.warn('[replay] no visitor sessions yet (start Live Mocap once to record one)');
           return null;
         }
-        const last = sessionRefs[sessionRefs.length - 1];
-        const sessionData = last.cid
-          ? await pinata.fetchJSON(last.cid)
-          : null;
-        if (!sessionData || !Array.isArray(sessionData.frames) || sessionData.frames.length < 4) {
-          console.warn(`[replay] last visitor session ${last.session_id} has no valid frames`);
+        // Walk backwards to find the latest session that has actual frames
+        // (skip empty placeholders that ended up pinned by an aborted flush).
+        // We have to fetch the CID to know the frame count — manifest only
+        // has the reference. Cap the walk at 5 to avoid hammering Pinata when
+        // a user has many short aborted sessions.
+        const maxWalk = 5;
+        let last = null;
+        let sessionData = null;
+        for (let i = sessionRefs.length - 1; i >= Math.max(0, sessionRefs.length - maxWalk); i--) {
+          const ref = sessionRefs[i];
+          if (!ref.cid) continue;
+          const data = await pinata.fetchJSON(ref.cid);
+          if (data && Array.isArray(data.frames) && data.frames.length >= 4) {
+            last = ref;
+            sessionData = data;
+            break;
+          }
+        }
+        if (!last || !sessionData) {
+          console.warn(`[replay] no usable session in last ${maxWalk} captures (all empty or pinned-without-frames)`);
           return null;
         }
         console.log(`[replay] loading last visitor session ${last.session_id} (${sessionData.frames.length} frames, CID=${last.cid.slice(0, 12)}...)`);
@@ -1635,6 +1649,12 @@ async function loadAvatarMotion(url) {
         };
         // Pin this session's JSON to IPFS (always — even tiny updates are
         // cheaper than tracking diffs, and Pinata de-dupes by content hash).
+        // Skip empty auto-flushes mid-session (no point pinning 0 frames),
+        // but ALWAYS pin the final flush (it carries ended_at + a sentinel
+        // that the manifest needs to find the session later).
+        if (!liveCaptureFinalFlush && framesToWrite.length === 0) {
+          return;
+        }
         let sessionCid;
         try {
           sessionCid = await pinata.pinJSON(sessionEntry, `faller-session-${sessionId}`);
@@ -2990,11 +3010,13 @@ async function loadAvatarMotion(url) {
 
       // Replay Last Visitor — auto-activates on page load if motion_visitors.json
       // exists with at least one valid session. No inspector toggle: the
-      // artwork silently switches to the most recent visitor's captured motion
-      // when an archive is available, otherwise it plays the default
-      // choreography. This matches the "found-object sculpture" framing: the
-      // last visitor's gesture replaces the baseline until a newer one arrives.
-      enableReplayLastVisitor().catch((e) => console.warn('[replay] auto-enable failed:', e.message));
+      // NOTE: Replay Last Visitor used to auto-enable here if there was a
+      // previous session in the manifest (localStorage). That made the page
+      // show a frozen replay loop on every reload — visitors couldn't see
+      // the default choreography without manually disabling Replay first.
+      // Removed: Replay now only activates via the Live Mocap → stop flow,
+      // or via a future explicit user toggle. The default choreography in
+      // motion_latest.json is what plays on first load.
 
       window.addEventListener('resize', onWindowResize);
 
