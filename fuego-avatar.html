@@ -1585,16 +1585,29 @@ async function loadAvatarMotion(url) {
       }
       liveCaptureBuffer.push(frame);
 
-      // Cap the buffer so a static host (which rejects PUTs) doesn't grow
-      // it unbounded. When the cap is hit we drop the oldest frame — newer
-      // motion is more valuable than older.
-      const LIVE_CAPTURE_MAX_BUFFER = LIVE_CAPTURE_FLUSH_FRAMES * 4; // ~4s of motion
+      // Cap the buffer so a runaway session (e.g. user leaves Live Mocap on
+      // for 5 minutes) doesn't OOM the browser. Cap is 5 minutes at 30fps
+      // = 9000 frames, each ~200 bytes ≈ 1.8 MB max. That's a hard ceiling;
+      // most dance sessions are 10–60 seconds = 300–1800 frames.
+      const LIVE_CAPTURE_MAX_BUFFER = 9000;
       while (liveCaptureBuffer.length > LIVE_CAPTURE_MAX_BUFFER) {
         liveCaptureBuffer.shift();
       }
 
-      if (liveCaptureBuffer.length >= LIVE_CAPTURE_FLUSH_FRAMES && !liveCaptureFlushInFlight && !liveCaptureBackoffUntil) {
-        flushLiveCapture().catch((e) => console.warn('[capture] flush error:', e.message));
+      // Auto-flush trigger removed in ce823bb-related fix. The previous
+      // design flushed every 30 frames and replaced the manifest CID each
+      // time, which meant the final Replay only saw the last batch (e.g.
+      // 24 frames out of 300). Now we keep all frames in the live buffer
+      // and pin once on stopLiveMocap. Risk: if the user closes the tab
+      // mid-session we lose the capture — acceptable for an art piece.
+
+      // Keep this debug counter around so we can verify frame counts via
+      // the console if needed.
+      if (typeof window !== 'undefined' && !window.__fallerFrameCounter) {
+        window.__fallerFrameCounter = 0;
+      }
+      if (typeof window !== 'undefined') {
+        window.__fallerFrameCounter++;
       }
     }
 
@@ -1630,9 +1643,16 @@ async function loadAvatarMotion(url) {
         const startedAt = liveCaptureCurrentSessionStartedAt || nowIso;
         const inManifest = manifest.sessions.find((s) => s && s.session_id === sessionId);
         let framesToWrite;
-        if (isFinalFlush && inManifest && Array.isArray(inManifest.frames_in_cid)) {
-          // Re-fetch previous version of this session and concat with new
-          // frames that landed after the last auto-flush.
+        // On the FINAL flush, we want the final session JSON to contain
+        // ALL frames captured during the session — not just the ones still
+        // in the buffer. Each auto-flush during the session pinned the
+        // buffer to a CID and updated the manifest to point to that new CID
+        // (overwriting the previous CID). So to rebuild the full session we
+        // fetch the latest auto-flushed JSON and concatenate whatever's left
+        // in the buffer. Without this concat, a 10s dance captures 300
+        // frames across multiple auto-flushes but the final Replay only sees
+        // the last batch (e.g. 24 frames = 0.8s loop).
+        if (isFinalFlush && inManifest && inManifest.cid) {
           const prev = await pinata.fetchJSON(inManifest.cid);
           const prevFrames = (prev && Array.isArray(prev.frames)) ? prev.frames : [];
           framesToWrite = prevFrames.concat(liveCaptureBuffer);
