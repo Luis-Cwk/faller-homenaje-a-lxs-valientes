@@ -41,6 +41,11 @@
 
 <body>
 
+  <!-- Hidden <video> element bound to the webcam stream when live mocap is
+       active. The toggle itself lives in the Inspector's "Live Mocap"
+       folder (see end of GUI setup) — no floating UI. -->
+  <video id="realtime-webcam" playsinline muted style="display:none"></video>
+
   <script>
     // ── AudioContext early-unlock ──
     // Tone.js v14.8.49 (loaded next) synchronously creates a Transport with a
@@ -130,6 +135,7 @@
     import { TeapotGeometry } from 'three/addons/geometries/TeapotGeometry.js';
 
     import WebGPU from 'three/addons/capabilities/WebGPU.js';
+    import pinata from './pinata.js';
 
     if (WebGPU.isAvailable() === false) {
 
@@ -152,12 +158,35 @@
     // TSL fallback). We silence just that one warning class to keep the
     // console clean. All other warnings still pass through.
     const _origWarn = console.warn.bind(console);
+    const _origError = console.error.bind(console);
+    // Suppress known-noisy non-fatal warnings that clutter the console:
+    //   - "AttributeNode: Vertex attribute ... not found" — Three.js emits it
+    //     per missing attribute per pipeline compile; the Inspector re-emits
+    //     every frame the user touches a parameter. Non-fatal TSL probe.
+    //   - "Using NORM_RECT without IMAGE_DIMENSIONS is only supported for the
+    //     square ROI" — MediaPipe Pose/Hand Landmarker always reports this
+    //     once per session because the API doesn't accept imageProcessingOptions
+    //     for these tasks. The model still works correctly.
+    const _isAttributeWarning = (s) => {
+      if (!s) return false;
+      return /AttributeNode.*attribute.*not found/i.test(s)
+          || /Vertex attribute.*not found/i.test(s)
+          || /Using NORM_RECT without IMAGE_DIMENSIONS/i.test(s);
+    };
     console.warn = (...args) => {
       for (const a of args) {
-        const s = String(a);
-        if (s.includes('Vertex attribute') && s.includes('"uv"')) return;
+        if (_isAttributeWarning(String(a))) return;
       }
+      // Inspectors sometimes pass multiple args; flatten to detect concatenated fragments.
+      if (_isAttributeWarning(args.map(String).join(' '))) return;
       _origWarn(...args);
+    };
+    console.error = (...args) => {
+      for (const a of args) {
+        if (_isAttributeWarning(String(a))) return;
+      }
+      if (_isAttributeWarning(args.map(String).join(' '))) return;
+      _origError(...args);
     };
     // ================================================================
 
@@ -201,6 +230,7 @@
     let avatarStartTime = 0;
     let avatarLoaded = false;
     let avatarWorldAnchor = new THREE.Vector3(); // mirrored to uTeapotPosition
+    let floorY = 0;                              // world Y of the visual floor (set when floorPlane is created)
     let avatarLoopDuration = 0;         // seconds (frames / fps)
     let avatarFps = 30.0;               // FPS of the captured motion
     let avatarTimeAccumulator = 0;      // ms of unconsumed wall-time between frames
@@ -304,11 +334,36 @@
       [23, 25], [25, 27], [24, 26], [26, 28]
     ];
 
+    // MediaPipe Hand Landmarker finger connections (21 landmarks per hand).
+    // Layout per finger: tip is highest index, base is lower; thumb chain is
+    // its own 4-point path on the side of the palm. The first landmark (0)
+    // is the wrist — we anchor the hand overlay to the body pose's wrist
+    // (landmark 15 left / 16 right) so the fingers stay attached to the arm.
+    const HAND_CONNECTIONS = [
+      // Palm
+      [0, 1], [0, 5], [5, 9], [9, 13], [13, 17], [17, 1],
+      // Thumb
+      [1, 2], [2, 3], [3, 4],
+      // Index
+      [5, 6], [6, 7], [7, 8],
+      // Middle
+      [9, 10], [10, 11], [11, 12],
+      // Ring
+      [13, 14], [14, 15], [15, 16],
+      // Pinky
+      [17, 18], [18, 19], [19, 20],
+    ];
+    // Wrist anchor in body-pose space. Left wrist = 15, Right wrist = 16.
+    const HAND_WRIST_ANCHOR = { left: 15, right: 16 };
+    // Hand finger/landmark indices that map to the wrist anchor (used to
+    // offset the hand overlay so landmark 0 sits on top of the body wrist).
+    const HAND_LOCAL_OFFSET_INDEX = 0;
+
     // ── Idea 6: bumped for more imposing presence ──
     const AVATAR_JOINT_RADIUS = 0.10;     // was 0.07
     const AVATAR_BONE_RADIUS = 0.065;     // was 0.045
     const ENSEMBLE_RADIUS_DEFAULT = 1.8;  // used as initial value for params.ensembleRadius
-    const AVATAR_VERTICAL_OFFSET = 0.0;
+    const AVATAR_VERTICAL_OFFSET = -0.3;
 
     // Shared geometries/mats â€” one allocation for all avatars (perf)
     let avatarSharedJointGeo = null;
@@ -346,12 +401,12 @@
       }
     }
 
-    function createAvatarInstance() {
+function createAvatarInstance() {
       ensureAvatarAssets();
 
       const root = new THREE.Group();
 
-      // 33 joint meshes â€” each gets its own material clone so emissive per joint works.
+      // 33 joint meshes — each gets its own material clone so emissive per joint works.
       const joints = [];
       for (let i = 0; i < 33; i++) {
         const mat = avatarJointMat.clone();
@@ -363,7 +418,7 @@
         joints.push(m);
       }
 
-      // One bone mesh per connection â€” clone material so emissive per bone works
+      // One bone mesh per connection — clone material so emissive per bone works
       // and so we can tint by region.
       const bones = [];
       for (let i = 0; i < SKELETON_CONNECTIONS.length; i++) {
@@ -387,7 +442,60 @@
         bones.push(m);
       }
 
-      return { root, joints, bones };
+      // Hand overlays are created lazily on first live detection (so we don't
+      // waste geometry on users who never enter live mode). Each hand has 21
+      // joints + HAND_CONNECTIONS.length bones. Slightly smaller radius than
+      // the body joints so the fingers read as a finer detail.
+      const handOverlays = { left: null, right: null };
+
+      return { root, joints, bones, handOverlays };
+    }
+
+    // Build the per-hand rig the first time a hand is detected in live mode.
+    // Hand joints sit in the instance root frame so they translate with the
+    // body. They're hidden until a hand is detected.
+    function ensureHandOverlay(inst, side) {
+      if (inst.handOverlays[side]) return inst.handOverlays[side];
+
+      const handRoot = new THREE.Group();
+      handRoot.name = `hand-overlay-${side}`;
+      handRoot.visible = false;
+
+      const joints = [];
+      const radius = AVATAR_JOINT_RADIUS * 0.55;
+      const geo = new THREE.SphereGeometry(radius, 8, 6);
+      for (let i = 0; i < 21; i++) {
+        const mat = avatarJointMat.clone();
+        mat.emissiveIntensity = 1.0;
+        const m = new THREE.Mesh(geo, mat);
+        m.castShadow = false;
+        m.receiveShadow = false;
+        m.userData.handIdx = i;
+        m.position.set(0, -1000, 0); // parked below floor until first detection
+        handRoot.add(m);
+        joints.push(m);
+      }
+
+      const bones = [];
+      const boneRadius = AVATAR_BONE_RADIUS * 0.55;
+      const boneGeo = new THREE.CylinderGeometry(boneRadius, boneRadius, 1, 6, 1);
+      for (let i = 0; i < HAND_CONNECTIONS.length; i++) {
+        const mat = avatarBoneMat.clone();
+        mat.color.setHex(0xffaa66); // paler orange for fingers
+        const m = new THREE.Mesh(boneGeo, mat);
+        m.castShadow = false;
+        m.receiveShadow = false;
+        const [s, e] = HAND_CONNECTIONS[i];
+        m.userData.startIdx = s;
+        m.userData.endIdx = e;
+        m.visible = false;
+        handRoot.add(m);
+        bones.push(m);
+      }
+
+      inst.handOverlays[side] = { root: handRoot, joints, bones };
+      inst.root.add(handRoot);
+      return inst.handOverlays[side];
     }
 
     function buildAvatarEnsemble(count) {
@@ -407,7 +515,19 @@
       // Anchor at the teapot's world position (kept in sync with uTeapotPosition),
       // then lift +2.5m so MediaPipe-style coords (which sit slightly below their origin)
       // put the feet near the floor and the head around y â‰ˆ 6 (inside the fire volume).
-      avatarEnsembleParent.position.set(avatarWorldAnchor.x, avatarWorldAnchor.y + 2.5, avatarWorldAnchor.z);
+      // Anchor the ensemble so the feet land on floorPlane (y = 0.8), not on
+      // the teapot anchor. mediaPipeToLocal puts the body's mid-eyes at y=0
+      // and the feet near y=-2.5, so the parent must sit at floorY + 2.5 for
+      // the feet to actually touch the ground. avatarWorldAnchor (teapot
+      // position) is kept as the fire-source reference so the volumetric
+      // emission stays anchored to the teapot regardless of where the
+      // dancers stand visually.
+      avatarEnsembleParent.position.set(
+        avatarWorldAnchor.x,
+        floorY + 2.1,
+        avatarWorldAnchor.z
+      );
+      console.log('[avatars] parent.y=', avatarEnsembleParent.position.y, 'floorY=', floorY, 'anchorY=', avatarWorldAnchor.y);
       sceneRef.add(avatarEnsembleParent);
 
       const n = Math.max(1, count | 0);
@@ -839,7 +959,10 @@
       }
       // Save current as previous for next frame
       for (let i = 0; i < 33; i++) {
-        if (cur[i]) inst.firePrevPos[i].copy(cur[i]);
+        if (cur[i]) {
+          if (inst.firePrevPos[i]) inst.firePrevPos[i].copy(cur[i]);
+          else inst.firePrevPos[i] = cur[i].clone();
+        }
       }
 
       // Per-landmark heat:
@@ -882,7 +1005,464 @@
       }
     }
 
-    async function loadAvatarMotion(url) {
+    // ===============================================================
+    //  Live mocap — webcam pose tracking via MediaPipe Tasks Vision
+    // ===============================================================
+    //  Architecture:
+    //    1. setupLiveMocap() lazily loads the MediaPipe pose_landmarker model
+    //       and creates a hidden <video> bound to the user's webcam stream.
+    //    2. startLiveMocap() requests camera permission, then on each frame
+    //       detects 33 pose landmarks and pushes them into livePoseFrame.pose.
+    //    3. livePoseFrame is a one-element array that mimics the shape of
+    //       avatarFrameData[0], so applyAvatarFrame(0) keeps working with no
+    //       changes — only the data source switches from JSON playback to
+    //       live MediaPipe output.
+    //    4. stopLiveMocap() releases the camera and reverts to JSON playback.
+
+    const livePoseFrame = {
+      pose: new Array(33).fill(null).map(() => ({ x: 0.5, y: 0.5, z: 0, visibility: 0 })),
+      timestamp: 0,
+    };
+
+    let liveMocapActive = false;
+    let liveMocapLandmarker = null;
+    let liveMocapHandLandmarker = null;
+    let liveMocapHandsData = { left: null, right: null }; // current frame hand landmarks
+    let liveMocapStream = null;
+    let liveMocapVideo = null;
+    let liveMocapRAF = 0;
+    let liveMocapLastDetectionAt = 0;
+    let liveMocapLastVideoTime = -1;
+    let liveMocapMediaPipeTask = null;       // 'pose' | 'face' | 'hand' (kept for future expansion)
+    let liveMocapSavedFrameData = null;       // snapshot of avatarFrameData before swap
+    let liveMocapSavedCurrentFrame = 0;       // remember playback position to restore
+    const MEDIAPIPE_VISION_VERSION = '0.10.32';
+    const MEDIAPIPE_WASM_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VISION_VERSION}/wasm`;
+    const MEDIAPIPE_POSE_MODEL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
+
+    function setLivePoseFromLandmarks(landmarks) {
+      const pose = livePoseFrame.pose;
+      // Track which landmarks are still confidently visible this frame so we
+      // can flip jointEverSeen back to false for the ones that lost tracking.
+      // Without this, the rig freezes joints at their last position ("ghost
+      // avatar" effect) once MediaPipe's confidence on them drops.
+      const trackedThisFrame = new Array(33).fill(false);
+      if (landmarks && landmarks.length > 0) {
+        const n = Math.min(landmarks.length, 33);
+        for (let i = 0; i < n; i++) {
+          const lm = landmarks[i];
+          pose[i].x = lm.x;
+          pose[i].y = lm.y;
+          pose[i].z = lm.z || 0;
+          const v = (typeof lm.visibility === 'number') ? lm.visibility : 1.0;
+          pose[i].visibility = v;
+          if (v > 0.25) trackedThisFrame[i] = true;
+        }
+      }
+      // Force-untrack any landmark that wasn't returned with usable confidence.
+      // MediaPipe Pose always returns 33 entries even when the body part isn't
+      // visible — it just drops visibility toward 0. The rig's JSON path treats
+      // visibility <= 0.25 as "joint not seen this frame" and hides that joint.
+      // We mirror that semantics here so joints leave the scene immediately
+      // when the camera loses sight of them.
+      for (let i = 0; i < 33; i++) {
+        if (!trackedThisFrame[i]) {
+          pose[i].x = 0.5;
+          pose[i].y = 0.5;
+          pose[i].z = 0;
+          pose[i].visibility = 0;
+          // Reset jointEverSeen so applyAvatarFrame re-parks the joint below
+          // the floor and hides it (instead of holding the last good pose).
+          for (const inst of avatarInstances) {
+            if (inst.jointEverSeen) inst.jointEverSeen[i] = false;
+          }
+        }
+      }
+      livePoseFrame.timestamp = performance.now();
+    }
+
+    // MediaPipe HandLandmarker returns landmarks with handedness info. We
+    // route them into liveMocapHandsData.{left, right} so the render loop can
+    // pick them up. When a hand stops being detected we set the slot to null
+    // so the hand joints fade out instead of freezing at the last pose.
+    function updateLiveHands(handResult) {
+      if (!handResult || !handResult.landmarks) {
+        liveMocapHandsData.left = null;
+        liveMocapHandsData.right = null;
+        return;
+      }
+      // Reset both slots; we'll refill the ones HandLandmarker found this frame.
+      let foundLeft = null;
+      let foundRight = null;
+      for (let i = 0; i < handResult.landmarks.length; i++) {
+        const landmarks = handResult.landmarks[i];
+        const handedness = handResult.handedness && handResult.handedness[i];
+        // Handedness categories: 'Left' and 'Right' (MediaPipe's labels are
+        // mirrored from the camera's perspective, so a hand visible on the
+        // right of the frame is labelled 'Left'). We trust MediaPipe here.
+        const label = handedness && handedness[0] && handedness[0].categoryName;
+        if (label === 'Left' && !foundLeft) foundLeft = landmarks;
+        else if (label === 'Right' && !foundRight) foundRight = landmarks;
+      }
+      liveMocapHandsData.left = foundLeft;
+      liveMocapHandsData.right = foundRight;
+    }
+
+    async function setupLiveMocap() {
+      if (liveMocapLandmarker) return { pose: liveMocapLandmarker, hands: liveMocapHandLandmarker };
+
+      // Dynamically import MediaPipe Tasks Vision from CDN.
+      // Cached by the browser after first load.
+      const vision = await import(`https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VISION_VERSION}/vision_bundle.mjs`);
+      const { PoseLandmarker, HandLandmarker, FilesetResolver } = vision;
+
+      const fileset = await FilesetResolver.forVisionTasks(MEDIAPIPE_WASM_BASE);
+      liveMocapLandmarker = await PoseLandmarker.createFromOptions(fileset, {
+        baseOptions: {
+          modelAssetPath: MEDIAPIPE_POSE_MODEL,
+          delegate: 'GPU',
+        },
+        runningMode: 'VIDEO',
+        numPoses: 1,
+        minPoseDetectionConfidence: 0.5,
+        minPosePresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5,
+      });
+
+      // Hand tracking — 21 landmarks per hand, up to 2 simultaneous hands.
+      // Best-effort: if the model fails to load (network, WebGL issue), we
+      // keep pose-only mode and the rest of the pipeline keeps working.
+      try {
+        liveMocapHandLandmarker = await HandLandmarker.createFromOptions(fileset, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+            delegate: 'GPU',
+          },
+          runningMode: 'VIDEO',
+          numHands: 2,
+          minHandDetectionConfidence: 0.4,
+          minHandPresenceConfidence: 0.4,
+          minTrackingConfidence: 0.4,
+        });
+        console.log('[mocap] hand tracker ready');
+      } catch (e) {
+        console.warn('[mocap] hand tracker failed to load, continuing with pose only:', e.message);
+        liveMocapHandLandmarker = null;
+      }
+
+      liveMocapMediaPipeTask = 'pose+hands';
+      return { pose: liveMocapLandmarker, hands: liveMocapHandLandmarker };
+    }
+
+    async function startLiveMocap() {
+      if (liveMocapActive) return;
+
+      try {
+        const landmarker = await setupLiveMocap();
+        liveMocapVideo = document.getElementById('realtime-webcam');
+        liveMocapVideo.width = 640;
+        liveMocapVideo.height = 480;
+        liveMocapStream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 640, height: 480, facingMode: 'user' },
+          audio: false,
+        });
+        liveMocapVideo.srcObject = liveMocapStream;
+        // Wait for metadata so videoWidth/videoHeight reflect the actual stream
+        // resolution. Without this, MediaPipe logs the IMAGE_DIMENSIONS warning
+        // and falls back to a square ROI assumption.
+        await new Promise((resolve) => {
+          if (liveMocapVideo.readyState >= 1) resolve();
+          else liveMocapVideo.addEventListener('loadedmetadata', resolve, { once: true });
+        });
+        await liveMocapVideo.play();
+
+        liveMocapActive = true;
+        liveMocapLastVideoTime = -1;
+
+        // Start a new per-visitor capture session. Each live mocap activation
+        // gets its own session_id (filename-safe ISO timestamp) so the
+        // per-visitor archive accumulates independent sessions instead of
+        // destroying the committed motion_latest.json.
+        liveCaptureCurrentSessionId = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        liveCaptureCurrentSessionStartedAt = new Date().toISOString();
+        liveCaptureBuffer = [];
+        console.log(`[capture] started session ${liveCaptureCurrentSessionId}`);
+
+        // Swap avatarFrameData so applyAvatarFrame(0) reads livePoseFrame
+        // instead of the JSON. We preserve the playback index to restore
+        // seamlessly on stop.
+        liveMocapSavedFrameData = avatarFrameData;
+        liveMocapSavedCurrentFrame = avatarCurrentFrame;
+        avatarFrameData = [livePoseFrame];
+        avatarCurrentFrame = 0;
+        // Reset jointEverSeen so the rig starts in a "no joints seen" state.
+        // This matches the live semantics: only joints the camera is currently
+        // tracking are visible. Without the reset, previously-seen joints
+        // would render at their last cached position until they're re-seen.
+        for (const inst of avatarInstances) {
+          if (inst.jointEverSeen) inst.jointEverSeen.fill(false);
+          if (inst.smoothedBasePos) inst.smoothedBasePos.fill(undefined);
+          // Drop cached fire-overlay state too so velocity-driven ember
+          // spawns don't fire from stale positions during the first frames.
+          inst.firePrevPos = null;
+          inst.fireSpeedBuf = null;
+          inst.fireSeeded = false;
+        }
+        liveMocapLastDetectionAt = performance.now();
+
+        const detectLoop = () => {
+          // Re-check active state at the top so cancelAnimationFrame races
+          // don't keep the loop alive past stopLiveMocap. We also skip the
+          // next rAF if no longer active — this avoids leaking RAF callbacks
+          // after the user toggles off live mocap.
+          if (!liveMocapActive) {
+            liveMocapRAF = 0;
+            return;
+          }
+          const v = liveMocapVideo;
+          if (v && v.readyState >= 2 && v.currentTime !== liveMocapLastVideoTime) {
+            liveMocapLastVideoTime = v.currentTime;
+            const now = performance.now();
+            // Throttle to >=33ms between detections so we don't starve the
+            // GPU compute passes that drive the volumetric fire. ~30Hz is
+            // plenty for body pose and matches typical webcam framerates.
+            if (now - liveMocapLastDetectionAt >= 33) {
+              try {
+                let detectedPose = null;
+                if (landmarker.pose) {
+                  const poseResult = landmarker.pose.detectForVideo(v, now);
+                  if (poseResult && poseResult.landmarks && poseResult.landmarks.length > 0) {
+                    setLivePoseFromLandmarks(poseResult.landmarks[0]);
+                    detectedPose = poseResult.landmarks[0];
+                  } else {
+                    setLivePoseFromLandmarks(null);
+                  }
+                }
+                if (landmarker.hands) {
+                  const handResult = landmarker.hands.detectForVideo(v, now);
+                  updateLiveHands(handResult);
+                  // Only record frames that include at least a pose OR a hand.
+                  if (detectedPose || liveMocapHandsData.left || liveMocapHandsData.right) {
+                    pushLiveFrame(detectedPose, { left: liveMocapHandsData.left, right: liveMocapHandsData.right });
+                  }
+                } else if (detectedPose) {
+                  pushLiveFrame(detectedPose, null);
+                }
+                liveMocapLastDetectionAt = now;
+              } catch (e) {
+                // MediaPipe can throw if WebGL context is lost (GPU stall from
+                // fire compute). Swallow and let the next frame retry.
+                console.warn('[mocap] detect failed, will retry:', e.message);
+              }
+            }
+          }
+          // Only schedule the next frame if still active. This makes the loop
+          // self-terminating if active gets flipped off elsewhere.
+          if (liveMocapActive) {
+            liveMocapRAF = requestAnimationFrame(detectLoop);
+          } else {
+            liveMocapRAF = 0;
+          }
+        };
+        liveMocapRAF = requestAnimationFrame(detectLoop);
+
+        // Per-visitor capture writes to motion_visitors.json under its own
+        // session_id; the committed motion_latest.json is never touched, so
+        // no backup step is needed. The capture subsystem falls back silently
+        // to in-memory-only mode when the host rejects PUTs.
+
+        console.log('[mocap] live tracking started');
+        window.dispatchEvent(new Event('liveMocap:started'));
+      } catch (err) {
+        console.error('[mocap] failed to start live tracking:', err);
+        liveMocapActive = false;
+        throw err;
+      }
+    }
+
+    async function stopLiveMocap() {
+      if (!liveMocapActive) return;
+      if (!liveMocapActive) return;
+      liveMocapActive = false;
+      if (liveMocapRAF) cancelAnimationFrame(liveMocapRAF);
+      liveMocapRAF = 0;
+      if (liveMocapStream) {
+        for (const track of liveMocapStream.getTracks()) track.stop();
+        liveMocapStream = null;
+      }
+      if (liveMocapVideo) liveMocapVideo.srcObject = null;
+      // Clear stale hand data so the next applyLiveHandsOverlay call hides
+      // the previously-tracked hand instead of freezing it on screen.
+      liveMocapHandsData.left = null;
+      liveMocapHandsData.right = null;
+
+      // Restore the original avatarFrameData reference so JSON playback
+      // resumes from where it left off.
+      if (liveMocapSavedFrameData) {
+        avatarFrameData = liveMocapSavedFrameData;
+        avatarCurrentFrame = liveMocapSavedCurrentFrame;
+        liveMocapSavedFrameData = null;
+      }
+
+      // Close the per-visitor capture session: write the final ended_at and
+      // flush any remaining buffered frames to motion_visitors.json. We keep
+      // liveCaptureCurrentSessionId populated until AFTER the flush so the
+      // final write uses the correct session identifier; pushLiveFrame's
+      // `if (!liveMocapActive) return` guard prevents stray frames from
+      // landing on disk after cancelAnimationFrame races.
+      if (liveCaptureCurrentSessionId) {
+        const closedSessionId = liveCaptureCurrentSessionId;
+        const bufferedCount = liveCaptureBuffer.length;
+        console.log(`[capture] closing session ${closedSessionId} (${bufferedCount} buffered frames)`);
+        // Wait for any in-flight auto-flush to settle first, so the final
+        // flush below can actually run (otherwise it bails on the
+        // liveCaptureFlushInFlight guard and we lose the ended_at write).
+        let waitedMs = 0;
+        while (liveCaptureFlushInFlight && waitedMs < 2000) {
+          await new Promise((r) => setTimeout(r, 25));
+          waitedMs += 25;
+        }
+        liveCaptureFinalFlush = true;
+        await flushLiveCapture().catch((e) => console.warn('[capture] final flush error:', e.message));
+        liveCaptureFinalFlush = false;
+        liveCaptureCurrentSessionId = null;
+        liveCaptureCurrentSessionStartedAt = null;
+        // After the capture is committed to disk, immediately swap playback to
+        // the freshly captured session. This is the "grabador → reproductor"
+        // loop the user asked for: no page reload required between sessions.
+        if (!replayActive) {
+          enableReplayLastVisitor().catch((e) => console.warn('[replay] auto-enable after capture failed:', e.message));
+        } else {
+          // Replay was already on (showing an earlier visitor); refresh it so
+          // the newest captured session replaces the older playback.
+          disableReplayLastVisitor();
+          enableReplayLastVisitor().catch((e) => console.warn('[replay] refresh after capture failed:', e.message));
+        }
+      }
+
+      console.log('[mocap] live tracking stopped, reverted to JSON playback');
+      window.dispatchEvent(new Event('liveMocap:stopped'));
+    }
+
+    // Live mocap is now toggled from the Inspector's "Live Mocap" folder.
+    // The floating button was removed because it competed visually with
+    // the parameter panel. The start/stop functions are dispatched via the
+    // window events 'liveMocap:started' and 'liveMocap:stopped' so any UI
+    // (button, inspector, hotkey, ...) can stay in sync.
+
+    // ── Replay Last Visitor ──
+    //  Reads the most recent per-visitor session from motion_visitors.json
+    //  and swaps avatarFrameData so the JSON playback shows the last
+    //  visitor's captured motion instead of the default choreography.
+    //  If no archive exists (or the host rejects the read), the toggle
+    //  auto-disables and a single info log is emitted.
+
+    let replaySavedFrameData = null;      // snapshot of avatarFrameData before swap
+    let replaySavedCurrentFrame = 0;       // remember playback index to restore
+    let replayActive = false;              // true while "Replay Last Visitor" is on
+
+    // Manifest stored at IPFS via Pinata — append-only list of session CIDs.
+    // Each session = its own pinned JSON. Manifest CID lives in localStorage so
+    // we don't have to scan IPFS or commit to the static HTML.
+    const FALLER_MANIFEST_KEY = 'faller:visitor-manifest';
+    async function loadManifest() {
+      // 1) localStorage manifest (set after each successful pin)
+      try {
+        const raw = localStorage.getItem(FALLER_MANIFEST_KEY);
+        if (raw) {
+          const j = JSON.parse(raw);
+          if (Array.isArray(j.sessions) && j.sessions.length > 0) {
+            return j;
+          }
+        }
+      } catch (e) { /* ignore */ }
+      // 2) Try to load the latest manifest from IPFS via known CIDs (none on
+      //    first install — that's fine, the first visitor's pin becomes the
+      //    manifest root).
+      return { metadata: { created: null, session_count: 0 }, sessions: [] };
+    }
+    async function saveManifest(manifest) {
+      try {
+        localStorage.setItem(FALLER_MANIFEST_KEY, JSON.stringify(manifest));
+      } catch (e) { /* ignore quota errors */ }
+    }
+
+    async function loadLastVisitorSession() {
+      try {
+        const manifest = await loadManifest();
+        const sessionRefs = Array.isArray(manifest.sessions) ? manifest.sessions : [];
+        if (sessionRefs.length === 0) {
+          console.warn('[replay] no visitor sessions yet (start Live Mocap once to record one)');
+          return null;
+        }
+        const last = sessionRefs[sessionRefs.length - 1];
+        const sessionData = last.cid
+          ? await pinata.fetchJSON(last.cid)
+          : null;
+        if (!sessionData || !Array.isArray(sessionData.frames) || sessionData.frames.length < 4) {
+          console.warn(`[replay] last visitor session ${last.session_id} has no valid frames`);
+          return null;
+        }
+        console.log(`[replay] loading last visitor session ${last.session_id} (${sessionData.frames.length} frames, CID=${last.cid.slice(0, 12)}...)`);
+        return sessionData;
+      } catch (err) {
+        console.warn('[replay] failed to read visitor manifest:', err.message);
+        return null;
+      }
+    }
+
+    async function enableReplayLastVisitor() {
+      if (replayActive) return true;
+      const session = await loadLastVisitorSession();
+      if (!session) return false;
+      // Snapshot the original avatarFrameData so disableReplay() restores it.
+      replaySavedFrameData = avatarFrameData;
+      replaySavedCurrentFrame = avatarCurrentFrame;
+      avatarFrameData = session.frames;
+      avatarFps = session.fps || avatarFps || 30.0;
+      avatarLoopDuration = session.frames.length / Math.max(1, avatarFps);
+      avatarCurrentFrame = 0;
+      avatarLoaded = true;
+      avatarTimeAccumulator = 0;
+      avatarLastTick = null;
+      replayActive = true;
+      // Reset jointEverSeen so the rig doesn't keep joints from the previous
+      // choreography visible at their last cached positions for a frame.
+      for (const inst of avatarInstances) {
+        if (inst.jointEverSeen) inst.jointEverSeen.fill(false);
+        if (inst.smoothedBasePos) inst.smoothedBasePos.fill(undefined);
+        inst.firePrevPos = null;
+        inst.fireSpeedBuf = null;
+        inst.fireSeeded = false;
+      }
+      console.log(`[replay] now playing last visitor session (${session.frames.length} frames @ ${avatarFps}fps)`);
+      window.dispatchEvent(new Event('replayLastVisitor:enabled'));
+      return true;
+    }
+
+    function disableReplayLastVisitor() {
+      if (!replayActive) return;
+      // Restore the original avatarFrameData reference so default choreography
+      // resumes from where it was.
+      if (replaySavedFrameData) {
+        avatarFrameData = replaySavedFrameData;
+        avatarCurrentFrame = replaySavedCurrentFrame;
+      }
+      replaySavedFrameData = null;
+      replayActive = false;
+      // Reset joint state so cached positions don't bleed between choreographies.
+      for (const inst of avatarInstances) {
+        if (inst.jointEverSeen) inst.jointEverSeen.fill(false);
+        if (inst.smoothedBasePos) inst.smoothedBasePos.fill(undefined);
+        inst.firePrevPos = null;
+        inst.fireSpeedBuf = null;
+        inst.fireSeeded = false;
+      }
+      console.log('[replay] reverted to default choreography');
+      window.dispatchEvent(new Event('replayLastVisitor:disabled'));
+    }
+
+async function loadAvatarMotion(url) {
       try {
         const resp = await fetch(url, { cache: 'no-store' });
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
@@ -897,7 +1477,7 @@
         console.log(`[avatars] loaded ${avatarFrameData.length} frames @ ${fps}fps (${avatarLoopDuration.toFixed(2)}s)`);
         if (typeof document !== 'undefined') {
           const info = document.getElementById('info');
-          if (info) info.textContent = `Motion loaded: ${avatarFrameData.length} frames @ ${fps} fps`;
+          if (info) info.textContent = `Motion loaded: ${avatarFrameData.length} frames @ ${fps}fps`;
         }
       } catch (err) {
         console.error('[avatars] failed to load motion JSON:', err);
@@ -907,6 +1487,171 @@
         }
       }
     }
+
+    // ===============================================================
+    //  Live capture buffer — "the artwork appropriates the movement"
+    // ===============================================================
+    //  While live mocap is active we record every detected frame (pose + up
+    //  to 2 hands with 21 landmarks each) into a memory buffer. Every ~1s
+    //  (~30 frames at 30fps) the buffer is atomically flushed to
+    //  motion_visitors.json via tmp+rename so a crash mid-session never
+    //  leaves the file half-written.
+    //
+    //  Each live mocap activation creates a NEW session entry with a unique
+    //  session_id (ISO timestamp, filename-safe). The original choreography
+    //  in motion_latest.json is NEVER touched at runtime — visitors see the
+    //  default dance unless live mocap is active, and only live mocap writes
+    //  to disk. This separates the "official" committed choreography from
+    //  the per-visitor archive that accumulates over time.
+
+    const LIVE_CAPTURE_FLUSH_FRAMES = 30; // ~1 second at 30fps
+    const MOTION_JSON_URL = 'motion_latest.json';           // read-only default choreography
+    const VISITOR_CAPTURE_URL = 'motion_visitors.json';     // write-only per-visitor archive
+
+    let liveCaptureBuffer = [];     // array of frame objects
+    let liveCaptureFlushInFlight = false;
+    let liveCaptureBackoffUntil = 0;  // performance.now() timestamp; flush is suppressed until this time
+    let liveCaptureWriteSupported = null; // null = unknown, true/false = resolved by first attempt
+    let liveCaptureLastWarnTs = 0; // throttle duplicate "cannot write" warnings
+    let liveCaptureCurrentSessionId = null;  // ISO timestamp, unique per live mocap activation
+    let liveCaptureCurrentSessionStartedAt = null;
+    let liveCaptureFinalFlush = false;       // true when stopLiveMocap triggers the last flush (writes ended_at)
+
+    // Per-visitor capture no longer needs a one-time backup of motion_latest.json:
+    // the original choreography is never touched at runtime. Each live session is
+    // appended to motion_visitors.json under its own session_id entry, so the
+    // per-visitor archive and the committed choreography stay independent.
+
+    function pushLiveFrame(poseLandmarks, handsData) {
+      // poseLandmarks: array of 33 {x,y,z,visibility} from PoseLandmarker,
+      //               or null if pose wasn't detected this tick.
+      // handsData: { left: 21 landmarks|null, right: 21 landmarks|null }.
+      // Bail out if no session is active OR live mocap has been turned off.
+      // detectLoop can fire one more time after cancelAnimationFrame due to
+      // rAF queue races; we don't want those orphan frames to land on disk.
+      if (!liveMocapActive) return;
+      if (!liveCaptureCurrentSessionId) return;
+      const frame = {
+        timestamp: new Date().toISOString(),
+        pose: poseLandmarks ? poseLandmarks.map((lm) => ({
+          x: lm.x, y: lm.y, z: lm.z || 0,
+          visibility: (typeof lm.visibility === 'number') ? lm.visibility : 1.0,
+        })) : null,
+      };
+      if (handsData && (handsData.left || handsData.right)) {
+        frame.hands = {};
+        if (handsData.left) frame.hands.left = handsData.left.map((lm) => ({ x: lm.x, y: lm.y, z: lm.z || 0 }));
+        if (handsData.right) frame.hands.right = handsData.right.map((lm) => ({ x: lm.x, y: lm.y, z: lm.z || 0 }));
+      }
+      liveCaptureBuffer.push(frame);
+
+      // Cap the buffer so a static host (which rejects PUTs) doesn't grow
+      // it unbounded. When the cap is hit we drop the oldest frame — newer
+      // motion is more valuable than older.
+      const LIVE_CAPTURE_MAX_BUFFER = LIVE_CAPTURE_FLUSH_FRAMES * 4; // ~4s of motion
+      while (liveCaptureBuffer.length > LIVE_CAPTURE_MAX_BUFFER) {
+        liveCaptureBuffer.shift();
+      }
+
+      if (liveCaptureBuffer.length >= LIVE_CAPTURE_FLUSH_FRAMES && !liveCaptureFlushInFlight && !liveCaptureBackoffUntil) {
+        flushLiveCapture().catch((e) => console.warn('[capture] flush error:', e.message));
+      }
+    }
+
+    async function flushLiveCapture() {
+      // For the final flush from stopLiveMocap, allow the write even if the
+      // buffer is already empty (the auto-flushes have already drained it) —
+      // we still need to set ended_at on the in-progress session.
+      const isFinalFlush = liveCaptureFinalFlush;
+      if (!isFinalFlush) {
+        if (liveCaptureBuffer.length === 0 || liveCaptureFlushInFlight) return;
+        if (liveCaptureWriteSupported === false) return;
+        if (performance.now() < liveCaptureBackoffUntil) return;
+      }
+      if (!liveCaptureCurrentSessionId && !isFinalFlush) return;
+      if (liveCaptureFlushInFlight) {
+        // Wait briefly for the in-flight flush to settle so we don't pile up.
+        let waited = 0;
+        while (liveCaptureFlushInFlight && waited < 1500) {
+          await new Promise((r) => setTimeout(r, 25));
+          waited += 25;
+        }
+      }
+
+      liveCaptureFlushInFlight = true;
+      try {
+        // Load the current IPFS manifest (or start fresh).
+        const manifest = await loadManifest();
+        // Append-only IPFS archive: each flush pins a fresh session JSON
+        // (or updates the in-progress session's frames if it's the same
+        // session_id). The manifest in localStorage tracks {session_id, cid}.
+        const nowIso = new Date().toISOString();
+        const sessionId = liveCaptureCurrentSessionId;
+        const startedAt = liveCaptureCurrentSessionStartedAt || nowIso;
+        const inManifest = manifest.sessions.find((s) => s && s.session_id === sessionId);
+        let framesToWrite;
+        if (isFinalFlush && inManifest && Array.isArray(inManifest.frames_in_cid)) {
+          // Re-fetch previous version of this session and concat with new
+          // frames that landed after the last auto-flush.
+          const prev = await pinata.fetchJSON(inManifest.cid);
+          const prevFrames = (prev && Array.isArray(prev.frames)) ? prev.frames : [];
+          framesToWrite = prevFrames.concat(liveCaptureBuffer);
+        } else {
+          framesToWrite = liveCaptureBuffer.slice();
+        }
+        const sessionEntry = {
+          session_id: sessionId,
+          started_at: startedAt,
+          ended_at: liveCaptureFinalFlush ? nowIso : null,
+          frame_count: framesToWrite.length,
+          fps: avatarFps || 30.0,
+          frames: framesToWrite,
+        };
+        // Pin this session's JSON to IPFS (always — even tiny updates are
+        // cheaper than tracking diffs, and Pinata de-dupes by content hash).
+        let sessionCid;
+        try {
+          sessionCid = await pinata.pinJSON(sessionEntry, `faller-session-${sessionId}`);
+        } catch (e) {
+          liveCaptureWriteSupported = false;
+          liveCaptureBackoffUntil = performance.now() + 5000;
+          const now = performance.now();
+          if (now - liveCaptureLastWarnTs > 30000) {
+            liveCaptureLastWarnTs = now;
+            console.warn('[capture] pin to Pinata failed:', e.message, '— buffer retained for retry');
+          }
+          return;
+        }
+        // Update manifest entry: replace if same session, append if new.
+        const idx = manifest.sessions.findIndex((s) => s && s.session_id === sessionId);
+        const refEntry = { session_id: sessionId, cid: sessionCid, frame_count: framesToWrite.length };
+        if (idx >= 0) {
+          manifest.sessions[idx] = refEntry;
+        } else {
+          manifest.sessions.push(refEntry);
+        }
+        manifest.metadata = manifest.metadata || {};
+        manifest.metadata.last_session_at = nowIso;
+        manifest.metadata.session_count = manifest.sessions.length;
+        if (!manifest.metadata.created) manifest.metadata.created = nowIso;
+        await saveManifest(manifest);
+
+        liveCaptureWriteSupported = true;
+        liveCaptureBuffer = [];
+        console.log(`[capture] pinned session ${sessionId} (${framesToWrite.length} frames) → CID ${sessionCid.slice(0, 16)}...`);
+      } finally {
+        liveCaptureFlushInFlight = false;
+      }
+    }
+
+    // Final flush on page unload so the last few captured frames aren't lost
+    // when the user closes the tab. best-effort; sync sendBeacon would be
+    // ideal but doesn't support custom URLs on most CDNs.
+    window.addEventListener('beforeunload', () => {
+      if (liveCaptureBuffer.length > 0 && !liveCaptureFlushInFlight) {
+        flushLiveCapture();
+      }
+    });
 
     // NOTE: `init()` is intentionally invoked at the END of this module (see final line below).
     // Calling it earlier would race the top-down `let` initialisations for `lastTime`,
@@ -1348,6 +2093,29 @@
       renderer.shadowMap.enabled = true;
       renderer.shadowMap.transmitted = true;
       renderer.inspector = new Inspector();
+      // Patch the Inspector's console tab so the AttributeNode warning never
+      // reaches its in-UI message buffer. Without this, every slider tweak
+      // re-emits the warning into the Inspector's "Console" tab even though
+      // the browser's console is already silenced. We patch the Console tab
+      // directly because three.js/webgpu captures the bound resolveConsole
+      // reference at construction time, so patching resolveConsole has no
+      // effect on the in-UI renderer.
+      {
+        const consoleTab = renderer.inspector.console;
+        if (consoleTab && typeof consoleTab.addMessage === 'function') {
+          const _origAddMessage = consoleTab.addMessage.bind(consoleTab);
+          consoleTab.addMessage = (level, message, ...rest) => {
+            const flat = String(message || '');
+            if ((level === 'warn' || level === 'error')
+             && (/AttributeNode.*attribute.*not found/i.test(flat)
+              || /Vertex attribute.*not found/i.test(flat)
+              || /Using NORM_RECT without IMAGE_DIMENSIONS/i.test(flat))) {
+              return;
+            }
+            return _origAddMessage(level, message, ...rest);
+          };
+        }
+      }
       document.body.appendChild(renderer.domElement);
 
       scene = new THREE.Scene();
@@ -1378,7 +2146,7 @@
       // ensemble so the dancers never leave the frame, no matter how the
       // user rotates. Pan is disabled to keep the framing fixed.
       controls = new OrbitControls(camera, renderer.domElement);
-      controls.target.set(0, 2.9, 0); // centre of the dancers (avatarWorldAnchor.y + 2.5 ≈ 2.5, +0.1 for chest height)
+      controls.target.set(0, 3.3, 0); // centre of the dancers (parent.y = floorPlane.y + 2.5 = 0.8 + 2.5 = 3.3)
       controls.enableDamping = true;
       controls.dampingFactor = 0.06;
       controls.enablePan = false;
@@ -1628,6 +2396,7 @@
       floorPlane.position.y = - VOLUME_WORLD_SIZE_Y / 2 + 0.4 + VOLUME_WORLD_SIZE_Y / 2 + 0.4;
       floorPlane.receiveShadow = true;
       scene.add(floorPlane);
+      floorY = floorPlane.position.y;
 
       // Teapot - opaque object inside the smoke, to visualize volumetric transparency / occlusion.
       // We *keep* teapot entirely inside the volumetric smoke (so the wind/density/uTeapotPosition
@@ -2150,6 +2919,56 @@
         });
       });
 
+      // ── Live Mocap folder ──
+      // Toggle webcam-driven pose tracking. When active, the avatar rig is
+      // driven by MediaPipe Tasks Vision reading from the user's webcam
+      // instead of motion_latest.json playback. The floating "Real time"
+      // button stays available for quick access from the viewport; this
+      // inspector control is the canonical toggle.
+      const liveMocapCtl = { on: false };
+      const liveMocapFolder = gui.addFolder('Live Mocap');
+      const liveMocapToggleCtrl = liveMocapFolder.add(liveMocapCtl, 'on').name('Webcam Tracking');
+      // Re-entry guard: when we programmatically set the value via setValue(),
+      // the editor's 'change' event fires synchronously and re-triggers
+      // onChange(), which would re-enter startLiveMocap/stopLiveMocap.
+      // Guard blocks re-entry while we're updating the editor ourselves.
+      let _syncing = false;
+      const _syncCtrl = (v) => {
+        _syncing = true;
+        liveMocapCtl.on = v;
+        liveMocapToggleCtrl.setValue(v);
+        _syncing = false;
+      };
+      liveMocapToggleCtrl.onChange(async (v) => {
+        if (_syncing) return; // ignore programmatic updates
+        if (v) {
+          try { await startLiveMocap(); }
+          catch (e) {
+            // Revert the toggle if camera failed (permission denied, no device).
+            _syncCtrl(false);
+          }
+        } else {
+          // stopLiveMocap is async — wait for the final capture flush before
+          // letting the toggle settle. Otherwise the Inspector UI may show
+          // "stopped" while the final PUT is still in flight.
+          try { await stopLiveMocap(); }
+          catch (e) { console.warn('[mocap] stop failed:', e.message); }
+        }
+      });
+      // Keep the inspector toggle in sync when something else flips the live
+      // state (e.g. a future hotkey, another UI button). The custom events
+      // fire AFTER state has settled, so we just mirror the new value.
+      window.addEventListener('liveMocap:started', () => _syncCtrl(true));
+      window.addEventListener('liveMocap:stopped', () => _syncCtrl(false));
+
+      // Replay Last Visitor — auto-activates on page load if motion_visitors.json
+      // exists with at least one valid session. No inspector toggle: the
+      // artwork silently switches to the most recent visitor's captured motion
+      // when an archive is available, otherwise it plays the default
+      // choreography. This matches the "found-object sculpture" framing: the
+      // last visitor's gesture replaces the baseline until a newer one arrives.
+      enableReplayLastVisitor().catch((e) => console.warn('[replay] auto-enable failed:', e.message));
+
       window.addEventListener('resize', onWindowResize);
 
       // Run the resize handler once after init so the canvas drawing buffer
@@ -2208,6 +3027,66 @@
     // anchored at the ensemble centroid and scaled to ENSEMBLE_RADIUS so the
     // silhouette spans the dancer circle.
     // ──────────────────────────────────────────────────────────────────────
+    // applyLiveHandsOverlay(scale) — render the per-hand 21-point skeleton for
+    // each avatar in live mocap mode. Each hand's wrist landmark is anchored
+    // to the body-pose wrist (landmark 15/16) so the fingers stay connected
+    // to the arm when the user moves their wrist.
+    function applyLiveHandsOverlay(scale = 1.0) {
+      // Always iterate hand overlays so we can hide stale ones when live mocap
+      // is off. The previous early-return when !liveMocapActive left the last
+      // detected hand pose frozen on screen.
+      for (const inst of avatarInstances) {
+        for (const side of ['left', 'right']) {
+          const landmarks = liveMocapHandsData[side];
+          if (!liveMocapActive || !landmarks) {
+            if (inst.handOverlays[side]) {
+              inst.handOverlays[side].root.visible = false;
+            }
+            continue;
+          }
+          const overlay = ensureHandOverlay(inst, side);
+          overlay.root.visible = true;
+
+          // Place each of the 21 hand landmarks directly in world-local space
+          // using the same mediaPipeToLocal transform the body uses. We do NOT
+          // anchor to the body wrist (landmark 15/16) because MediaPipe Pose
+          // and MediaPipe Hands run independently and report slightly different
+          // wrist positions; forcing the hand to land on Pose's wrist caused
+          // visible separation between arm and fingers. Each model is now
+          // trusted to report its own coordinates.
+          for (let i = 0; i < 21; i++) {
+            const lm = landmarks[i];
+            const x = (lm.x - 0.5) * 5.0;
+            const y = (0.5 - lm.y) * 5.0;
+            const z = -(lm.z || 0) * 2.0;
+            const j = overlay.joints[i];
+            j.position.set(x * scale, y * scale, z * scale);
+            j.visible = true;
+          }
+          // Update bones (cylinders between connected landmarks)
+          for (const bone of overlay.bones) {
+            const s = overlay.joints[bone.userData.startIdx];
+            const e = overlay.joints[bone.userData.endIdx];
+            if (!s.visible || !e.visible) { bone.visible = false; continue; }
+            const mid = s.position.clone().add(e.position).multiplyScalar(0.5);
+            const dist = s.position.distanceTo(e.position);
+            bone.position.copy(mid);
+            bone.scale.set(scale, dist * scale, scale);
+            // Align cylinder up-axis (Y) with the segment direction
+            const dir = e.position.clone().sub(s.position);
+            if (dir.lengthSq() > 1e-8) {
+              dir.normalize();
+              const up = new THREE.Vector3(0, 1, 0);
+              bone.quaternion.setFromUnitVectors(up, dir);
+            } else {
+              bone.quaternion.identity();
+            }
+            bone.visible = dist > 1e-4;
+          }
+        }
+      }
+    }
+
     function updateEmitterFromAvatars(delta) {
       if (!teapot || !teapot.geometry) return;
       if (!avatarInstances || avatarInstances.length === 0) return;
@@ -2306,7 +3185,17 @@
       lastTime = currentTime;
 
       // â”€â”€ Advance avatar animation (frame-locked to data FPS) â”€â”€
-      if (avatarLoaded && avatarFrameData.length > 0) {
+      if (liveMocapActive) {
+        // Live mode: skip JSON playback and feed applyAvatarFrame with the
+        // single-element livePoseFrame whose .pose is rewritten every time
+        // MediaPipe detects new landmarks. Stale-frame guard: if MediaPipe
+        // hasn't delivered fresh data in >250ms (e.g. user left the frame),
+        // we still re-apply the last good pose so joints hold position.
+        const liveAge = currentTime - liveMocapLastDetectionAt;
+        if (liveAge < 250) {
+          applyAvatarFrame(0, params.avatarScale);
+        }
+      } else if (avatarLoaded && avatarFrameData.length > 0) {
         const fps = (avatarFps > 0) ? avatarFps : 30.0;
         const frameDuration = 1000 / fps; // ms per data frame
         // Carry the time-overflow so we don't drift when delta hitches.
@@ -2322,11 +3211,39 @@
         applyAvatarFrame(avatarCurrentFrame, params.avatarScale);
       }
 
+      // ── Fire intensity for reactive audio ──
+      //  Sample the per-instance fireSpeedBuf (joint velocities computed in
+      //  applyAvatarFireOverlay) and reduce to a single 0..1 value that the
+      //  audio subsystem uses to modulate drone/ember/crackle volumes.
+      //  We clamp so a single fast kick doesn't pin the audio at max.
+      if (avatarInstances && avatarInstances.length > 0) {
+        let totalSpeed = 0;
+        let sampleCount = 0;
+        for (const inst of avatarInstances) {
+          if (!inst.fireSpeedBuf) continue;
+          for (let i = 0; i < inst.fireSpeedBuf.length; i++) {
+            totalSpeed += inst.fireSpeedBuf[i];
+            sampleCount++;
+          }
+        }
+        const avgSpeed = sampleCount > 0 ? (totalSpeed / sampleCount) : 0;
+        // Map avg speed (~0..2.5 m/s typical) to intensity (~0.2..1.0). 0.2
+        // floor keeps the fire audible when dancers are still.
+        const intensity = Math.max(0.2, Math.min(1.0, 0.2 + avgSpeed * 0.4));
+        if (typeof window.setFireIntensity === 'function') {
+          window.setFireIntensity(intensity);
+        }
+      }
+
       if (controls && typeof controls.update === 'function') controls.update();
 
       // Refresh the synthetic emitter buffer with current avatar joint positions
       // so the volumetric fire follows the dancers. Must run AFTER applyAvatarFrame.
       updateEmitterFromAvatars(delta);
+
+      // Live hand overlay (procedural 21-point fingers when MediaPipe detects them).
+      // Cheap no-op when live is inactive or no hands are in frame.
+      applyLiveHandsOverlay(params.avatarScale);
 
       // ── Idea 2: step the ember particle system ──
       if (emberPoints) updateEmbers(delta);
