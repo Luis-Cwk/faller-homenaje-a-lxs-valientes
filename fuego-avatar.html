@@ -235,6 +235,14 @@
     let avatarFps = 30.0;               // FPS of the captured motion
     let avatarTimeAccumulator = 0;      // ms of unconsumed wall-time between frames
     let avatarLastTick = null;          // last `currentTime` we integrated from
+    // Immutable snapshot of the default choreography. Captured once by
+    // loadAvatarMotion() and reused by both Replay and Live Mocap to
+    // restore the original frames. Without this, swapping avatarFrameData
+    // twice (e.g. Replay on, then Live Mocap on/off) loses the reference
+    // to motion_latest.json.
+    let avatarOriginalFrameData = null;
+    let avatarOriginalFps = 30.0;
+    let avatarOriginalFrameIndex = 0;
 
     // ── Idea 2: ember particle system globals ──
     const MAX_EMBERS = 600;
@@ -1034,8 +1042,6 @@ function createAvatarInstance() {
     let liveMocapLastDetectionAt = 0;
     let liveMocapLastVideoTime = -1;
     let liveMocapMediaPipeTask = null;       // 'pose' | 'face' | 'hand' (kept for future expansion)
-    let liveMocapSavedFrameData = null;       // snapshot of avatarFrameData before swap
-    let liveMocapSavedCurrentFrame = 0;       // remember playback position to restore
     const MEDIAPIPE_VISION_VERSION = '0.10.32';
     const MEDIAPIPE_WASM_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VISION_VERSION}/wasm`;
     const MEDIAPIPE_POSE_MODEL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
@@ -1189,10 +1195,11 @@ function createAvatarInstance() {
         console.log(`[capture] started session ${liveCaptureCurrentSessionId}`);
 
         // Swap avatarFrameData so applyAvatarFrame(0) reads livePoseFrame
-        // instead of the JSON. We preserve the playback index to restore
-        // seamlessly on stop.
-        liveMocapSavedFrameData = avatarFrameData;
-        liveMocapSavedCurrentFrame = avatarCurrentFrame;
+        // instead of the JSON. The original choreography lives in
+        // avatarOriginalFrameData (set once by loadAvatarMotion) — we
+        // don't take a new snapshot here because if Replay was active,
+        // that snapshot would point to Replay's frames, not the default.
+        // Stop restores from avatarOriginalFrameData instead.
         avatarFrameData = [livePoseFrame];
         avatarCurrentFrame = 0;
         // Reset jointEverSeen so the rig starts in a "no joints seen" state.
@@ -1296,12 +1303,17 @@ function createAvatarInstance() {
       liveMocapHandsData.left = null;
       liveMocapHandsData.right = null;
 
-      // Restore the original avatarFrameData reference so JSON playback
-      // resumes from where it left off.
-      if (liveMocapSavedFrameData) {
-        avatarFrameData = liveMocapSavedFrameData;
-        avatarCurrentFrame = liveMocapSavedCurrentFrame;
-        liveMocapSavedFrameData = null;
+      // Restore the original avatarFrameData from the immutable snapshot
+      // captured by loadAvatarMotion. Don't use a per-call snapshot here —
+      // see startLiveMocap for the rationale.
+      if (avatarOriginalFrameData) {
+        avatarFrameData = avatarOriginalFrameData;
+        avatarFps = avatarOriginalFps;
+        avatarLoopDuration = avatarFrameData.length / Math.max(1, avatarFps);
+        avatarCurrentFrame = avatarOriginalFrameIndex;
+        avatarLoaded = avatarFrameData.length > 0;
+        avatarTimeAccumulator = 0;
+        avatarLastTick = null;
       }
 
       // Close the per-visitor capture session: write the final ended_at and
@@ -1357,8 +1369,6 @@ function createAvatarInstance() {
     //  If no archive exists (or the host rejects the read), the toggle
     //  auto-disables and a single info log is emitted.
 
-    let replaySavedFrameData = null;      // snapshot of avatarFrameData before swap
-    let replaySavedCurrentFrame = 0;       // remember playback index to restore
     let replayActive = false;              // true while "Replay Last Visitor" is on
 
     // Manifest stored at IPFS via Pinata — append-only list of session CIDs.
@@ -1415,9 +1425,8 @@ function createAvatarInstance() {
       if (replayActive) return true;
       const session = await loadLastVisitorSession();
       if (!session) return false;
-      // Snapshot the original avatarFrameData so disableReplay() restores it.
-      replaySavedFrameData = avatarFrameData;
-      replaySavedCurrentFrame = avatarCurrentFrame;
+      // Swap to the captured session frames. Disable uses avatarOriginalFrameData
+      // to restore the default choreography — no per-call snapshot needed.
       avatarFrameData = session.frames;
       avatarFps = session.fps || avatarFps || 30.0;
       avatarLoopDuration = session.frames.length / Math.max(1, avatarFps);
@@ -1442,13 +1451,17 @@ function createAvatarInstance() {
 
     function disableReplayLastVisitor() {
       if (!replayActive) return;
-      // Restore the original avatarFrameData reference so default choreography
-      // resumes from where it was.
-      if (replaySavedFrameData) {
-        avatarFrameData = replaySavedFrameData;
-        avatarCurrentFrame = replaySavedCurrentFrame;
+      // Restore from the immutable original snapshot captured by loadAvatarMotion.
+      // This works regardless of what state Live Mocap left behind.
+      if (avatarOriginalFrameData) {
+        avatarFrameData = avatarOriginalFrameData;
+        avatarFps = avatarOriginalFps;
+        avatarLoopDuration = avatarFrameData.length / Math.max(1, avatarFps);
+        avatarCurrentFrame = avatarOriginalFrameIndex;
+        avatarLoaded = avatarFrameData.length > 0;
+        avatarTimeAccumulator = 0;
+        avatarLastTick = null;
       }
-      replaySavedFrameData = null;
       replayActive = false;
       // Reset joint state so cached positions don't bleed between choreographies.
       for (const inst of avatarInstances) {
@@ -1474,6 +1487,15 @@ async function loadAvatarMotion(url) {
         avatarLoaded = avatarFrameData.length > 0;
         avatarTimeAccumulator = 0;
         avatarLastTick = null;
+        // Capture an immutable snapshot of the default choreography so both
+        // Replay and Live Mocap can swap avatarFrameData without losing the
+        // reference to the original. Previously each subsystem took its own
+        // snapshot, which meant starting Live Mocap while Replay was active
+        // would save Replay's frames as the "original" and restore those
+        // instead of motion_latest.json on stop.
+        avatarOriginalFrameData = avatarFrameData;
+        avatarOriginalFps = fps;
+        avatarOriginalFrameIndex = avatarCurrentFrame;
         console.log(`[avatars] loaded ${avatarFrameData.length} frames @ ${fps}fps (${avatarLoopDuration.toFixed(2)}s)`);
         if (typeof document !== 'undefined') {
           const info = document.getElementById('info');
