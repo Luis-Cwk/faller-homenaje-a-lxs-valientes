@@ -1246,7 +1246,7 @@
         }
       };
 
-      const treeMaterial = new THREE.MeshBasicMaterial({ color: 0x000000 });
+      const treeMaterial = new THREE.MeshBasicMaterial({ color: 0x0a1a0a });
 
       const generator = new TreeGenerator(treeMaterial);
       const variants = [];
@@ -1351,21 +1351,23 @@
       document.body.appendChild(renderer.domElement);
 
       scene = new THREE.Scene();
-      // ── Idea 3: radial gradient background (deep blue → black at edges) ──
+      // ── Idea 3: radial gradient background (toxic purple → black at edges) ──
       // We use TSL scene.backgroundNode so the gradient is computed on the GPU
-      // and visible behind the volumetric pass. Center is a warm dark-blue,
-      // edges fade to near-black for a natural vignette feel.
+      // and visible behind the volumetric pass. Center is a saturated toxic
+      // purple, edges fade to near-black for a natural vignette feel. Pushed
+      // toward uncanny valley: the warm fire bloom reads against a sickly,
+      // synthetic backdrop instead of a neutral dusk.
       scene.backgroundNode = screenUV.distance(0.5).mul(1.3).clamp().oneMinus()
-        .mix(color(0x0a0612), color(0x000000));
+        .mix(color(0x2d0a4e), color(0x050008));
       scene.background = null; // (backgroundNode takes precedence)
-      // ── Idea 7: cool gray haze ──
+      // ── Idea 7: toxic purple haze ──
       // The volumetric fire pushes a lot of warm light into the scene, so we
       // need a darker background/fog than the bare three.js example (which
-      // assumes an empty scene) to give the silhouettes contrast. Cool gray
-      // reads as forest shadow at dusk; the bloom of the fire warms up the
-      // centre without bleaching the pinos.
-      scene.fog = new THREE.FogExp2(0x4a5560, 0.05);
-      scene.background = new THREE.Color(0x4a5560);
+      // assumes an empty scene) to give the silhouettes contrast. Deep purple
+      // reads as chemical/UV shadow rather than forest at dusk; the warm
+      // bloom of the fire pops without bleaching the silhouettes.
+      scene.fog = new THREE.FogExp2(0x1a0a2e, 0.05);
+      scene.background = new THREE.Color(0x1a0a2e);
       // override backgroundNode so the haze color wins over the gradient backdrop
       scene.backgroundNode = null;
 

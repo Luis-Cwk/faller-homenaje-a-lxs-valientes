@@ -23,4 +23,17 @@ npm-debug.log*
 
 # motion_latest.json is INTENTIONALLY tracked — the deployed site loads it.
 # If you want to gitignore it later, just add it back here.
-.vercel
+
+# motion_visitors.json is generated at runtime by the local PUT server and
+# contains per-visitor capture sessions. Never commit it.
+motion_visitors.json
+
+# Local PUT-capable dev server (Vercel serves static, no PUT needed in prod).
+server-put.js
+start-put-server.bat
+
+# Pinata JWT — never commit. Injected via <meta name="pinata-jwt"> at deploy time.
+.env-faller
+
+# Per-deploy backups land in archive/ (kept locally for rollback).
+fuego-avatar.html.bak-before-deploy-*
