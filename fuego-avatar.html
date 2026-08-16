@@ -1248,11 +1248,15 @@ function createAvatarInstance() {
                 if (landmarker.hands) {
                   const handResult = landmarker.hands.detectForVideo(v, now);
                   updateLiveHands(handResult);
-                  // Only record frames that include at least a pose OR a hand.
-                  if (detectedPose || liveMocapHandsData.left || liveMocapHandsData.right) {
-                    pushLiveFrame(detectedPose, { left: liveMocapHandsData.left, right: liveMocapHandsData.right });
-                  }
-                } else if (detectedPose) {
+                  // Record EVERY frame at 30fps while Live Mocap is active,
+                  // not just frames where MediaPipe detected a body. This
+                  // keeps the replay faithful to the original duration (so
+                  // a 10-second dance plays back as 10 seconds, not 0.3s
+                  // when only 9 valid frames were captured). Frames with no
+                  // detection get pose=null and hands=null.
+                  pushLiveFrame(detectedPose, { left: liveMocapHandsData.left, right: liveMocapHandsData.right });
+                } else {
+                  // Same: always push, even when no pose detected this tick.
                   pushLiveFrame(detectedPose, null);
                 }
                 liveMocapLastDetectionAt = now;
