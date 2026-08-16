@@ -172,6 +172,7 @@ All already in `.gitignore`.
 ## Live URLs
 
 - **Production (canonical):** https://petrasynthetic.com/faller/ — has Pinata, per-visitor capture works
-- **Backup (mirror):** https://faller-homenaje-a-lxs-valientes.vercel.app — same code, no JWT, capture disabled (graceful)
+- **Backup (mirror):** https://faller-homenaje-a-lxs-valientes.vercel.app — same code, no JWT, capture disabled (graceful). **To shut down:** log into Vercel dashboard with the `dfrmnc22` account → Projects → `faller-homenaje-a-lxs-valientes` → Settings → General → "Delete Project". The Vercel URL will 404 and the GitHub repo stays untouched (so you can re-enable anytime by reconnecting).
+- **Staging:** https://petrasynthetic.com/faller-dev/ — same content as prod before the IPFS refactor (Aug 14). Currently returns 403 from nginx; FTP directory exists with audio.js + fuego-avatar.html + motion_latest.json, but Neubox doesn't have a nginx rule exposing it publicly. To re-enable: add a server block or location rule in Neubox's nginx config (we don't have access — Petra needs to do it from the Neubox panel or ask hosting support).
 
 Both serve the same `fuego-avatar.html` source. Neubox is the one that gets the JWT meta tag at deploy time.
