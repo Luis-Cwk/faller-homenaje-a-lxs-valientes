@@ -2967,6 +2967,7 @@ async function loadAvatarMotion(url) {
           try { await startLiveMocap(); }
           catch (e) {
             // Revert the toggle if camera failed (permission denied, no device).
+            console.error('[mocap] failed to start live tracking:', e.message);
             _syncCtrl(false);
           }
         } else {
