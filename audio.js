@@ -162,7 +162,8 @@ function buildAudioGraph() {
     noise: { type: 'pink' },
     envelope: { attack: 0.001, decay: 0.12, sustain: 0, release: 0.05 }
   }));
-  const crackleWetFilter = register(new Filter(900, 'bandpass', 1.5).connect(reverb));
+  const crackleWetFilter = register(new Filter(900, 'bandpass').connect(reverb));
+  crackleWetFilter.Q.value = 1.5;
   const crackleWetGain = register(new Gain(0.32).connect(crackleWetFilter));
   crackleWetGainRef = crackleWetGain;
   crackleWet.connect(crackleWetGain);
@@ -254,7 +255,8 @@ function buildAudioGraph() {
   //  Hot coals make a constant "shhhhh" that's the substrate under everything.
   //  Pink noise through a bandpass around 3kHz, very low volume, no envelope.
   const emberNoise = register(new Noise('pink').start());
-  const emberFilter = register(new Filter(3000, 'bandpass', 1.8).connect(reverb));
+  const emberFilter = register(new Filter(3000, 'bandpass').connect(reverb));
+  emberFilter.Q.value = 1.8;
   const emberLFO = register(new LFO(0.3, 0.10, 0.22).start());
   const emberGain = register(new Gain(0.12).connect(emberFilter));
   emberGainRef = emberGain;
@@ -268,7 +270,8 @@ function buildAudioGraph() {
     noise: { type: 'pink' },
     envelope: { attack: 0.005, decay: 0.45, sustain: 0, release: 0.15 }
   }));
-  const woodFilter = register(new Filter(350, 'bandpass', 1.2).connect(reverb));
+  const woodFilter = register(new Filter(350, 'bandpass').connect(reverb));
+  woodFilter.Q.value = 1.2;
   const woodGain = register(new Gain(0.18).connect(woodFilter));
   woodSynth.connect(woodGain);
 

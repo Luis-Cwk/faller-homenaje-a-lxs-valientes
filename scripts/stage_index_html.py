@@ -36,6 +36,21 @@ def main():
 
     src = source_html.read_text(encoding="utf-8")
 
+    # 0. Inject <meta http-equiv="Cache-Control" content="no-cache"> to bust
+    #    nginx caches when the user does a hard refresh. Petra's site has
+    #    nginx caching with Vary: Accept-Encoding,User-Agent that holds onto
+    #    stale HTML for ~1h after deploy. The cache-bust on asset URLs helps
+    #    the JS reload, but the HTML itself needs the meta tag too.
+    cache_meta = '  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">\n'
+    cache_meta_pragma = '  <meta http-equiv="Pragma" content="no-cache">\n'
+    cache_meta_expires = '  <meta http-equiv="Expires" content="0">\n'
+    if 'http-equiv="Cache-Control"' not in src:
+        src = src.replace(
+            '<meta charset="utf-8">',
+            '<meta charset="utf-8">\n' + cache_meta + cache_meta_pragma + cache_meta_expires,
+            1,
+        )
+
     # 1. Inject <meta name="pinata-jwt"> after <meta charset="utf-8"> if not present.
     #    If already present (re-deploy), replace it.
     meta_tag = f'  <meta name="pinata-jwt" content="{jwt}">\n'
