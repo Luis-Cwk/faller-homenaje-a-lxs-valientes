@@ -235,6 +235,14 @@
     let avatarFps = 30.0;               // FPS of the captured motion
     let avatarTimeAccumulator = 0;      // ms of unconsumed wall-time between frames
     let avatarLastTick = null;          // last `currentTime` we integrated from
+    // Immutable snapshot of the default choreography. Captured once by
+    // loadAvatarMotion() and reused by both Replay and Live Mocap to
+    // restore the original frames. Without this, swapping avatarFrameData
+    // twice (e.g. Replay on, then Live Mocap on/off) loses the reference
+    // to motion_latest.json.
+    let avatarOriginalFrameData = null;
+    let avatarOriginalFps = 30.0;
+    let avatarOriginalFrameIndex = 0;
 
     // ── Idea 2: ember particle system globals ──
     const MAX_EMBERS = 600;
@@ -1034,8 +1042,6 @@ function createAvatarInstance() {
     let liveMocapLastDetectionAt = 0;
     let liveMocapLastVideoTime = -1;
     let liveMocapMediaPipeTask = null;       // 'pose' | 'face' | 'hand' (kept for future expansion)
-    let liveMocapSavedFrameData = null;       // snapshot of avatarFrameData before swap
-    let liveMocapSavedCurrentFrame = 0;       // remember playback position to restore
     const MEDIAPIPE_VISION_VERSION = '0.10.32';
     const MEDIAPIPE_WASM_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VISION_VERSION}/wasm`;
     const MEDIAPIPE_POSE_MODEL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
@@ -1189,10 +1195,11 @@ function createAvatarInstance() {
         console.log(`[capture] started session ${liveCaptureCurrentSessionId}`);
 
         // Swap avatarFrameData so applyAvatarFrame(0) reads livePoseFrame
-        // instead of the JSON. We preserve the playback index to restore
-        // seamlessly on stop.
-        liveMocapSavedFrameData = avatarFrameData;
-        liveMocapSavedCurrentFrame = avatarCurrentFrame;
+        // instead of the JSON. The original choreography lives in
+        // avatarOriginalFrameData (set once by loadAvatarMotion) — we
+        // don't take a new snapshot here because if Replay was active,
+        // that snapshot would point to Replay's frames, not the default.
+        // Stop restores from avatarOriginalFrameData instead.
         avatarFrameData = [livePoseFrame];
         avatarCurrentFrame = 0;
         // Reset jointEverSeen so the rig starts in a "no joints seen" state.
@@ -1241,11 +1248,15 @@ function createAvatarInstance() {
                 if (landmarker.hands) {
                   const handResult = landmarker.hands.detectForVideo(v, now);
                   updateLiveHands(handResult);
-                  // Only record frames that include at least a pose OR a hand.
-                  if (detectedPose || liveMocapHandsData.left || liveMocapHandsData.right) {
-                    pushLiveFrame(detectedPose, { left: liveMocapHandsData.left, right: liveMocapHandsData.right });
-                  }
-                } else if (detectedPose) {
+                  // Record EVERY frame at 30fps while Live Mocap is active,
+                  // not just frames where MediaPipe detected a body. This
+                  // keeps the replay faithful to the original duration (so
+                  // a 10-second dance plays back as 10 seconds, not 0.3s
+                  // when only 9 valid frames were captured). Frames with no
+                  // detection get pose=null and hands=null.
+                  pushLiveFrame(detectedPose, { left: liveMocapHandsData.left, right: liveMocapHandsData.right });
+                } else {
+                  // Same: always push, even when no pose detected this tick.
                   pushLiveFrame(detectedPose, null);
                 }
                 liveMocapLastDetectionAt = now;
@@ -1296,20 +1307,59 @@ function createAvatarInstance() {
       liveMocapHandsData.left = null;
       liveMocapHandsData.right = null;
 
-      // Restore the original avatarFrameData reference so JSON playback
-      // resumes from where it left off.
-      if (liveMocapSavedFrameData) {
-        avatarFrameData = liveMocapSavedFrameData;
-        avatarCurrentFrame = liveMocapSavedCurrentFrame;
-        liveMocapSavedFrameData = null;
+      // ── Immediate swap to the freshly captured frames ──
+      // We already have the recorded frames in `liveCaptureBuffer` (same shape
+      // as session.frames). Skip the "restore to motion_latest.json then fetch
+      // back from IPFS" roundtrip: that was producing a visible flash of the
+      // default choreography between stop and replay. Instead, swap playback
+      // directly to the captured buffer now, then pin to IPFS in the
+      // background so the session survives across reloads and shows up in
+      // loadLastVisitorSession() for visitors who arrive later.
+      const capturedFrames = liveCaptureBuffer.slice();
+      const capturedFps = avatarFps || 30.0;
+      if (capturedFrames.length >= 4) {
+        // Reset joint state so cached positions from the live pose don't
+        // bleed into the replayed frames.
+        for (const inst of avatarInstances) {
+          if (inst.jointEverSeen) inst.jointEverSeen.fill(false);
+          if (inst.smoothedBasePos) inst.smoothedBasePos.fill(undefined);
+          inst.firePrevPos = null;
+          inst.fireSpeedBuf = null;
+          inst.fireSeeded = false;
+        }
+        avatarFrameData = capturedFrames;
+        avatarFps = capturedFps;
+        avatarLoopDuration = capturedFrames.length / Math.max(1, avatarFps);
+        avatarCurrentFrame = 0;
+        avatarLoaded = true;
+        avatarTimeAccumulator = 0;
+        avatarLastTick = null;
+        replayActive = true;
+        console.log(`[replay] swapped immediately to captured session (${capturedFrames.length} frames @ ${avatarFps}fps)`);
+        window.dispatchEvent(new Event('replayLastVisitor:enabled'));
+      } else if (avatarOriginalFrameData) {
+        // Nothing usable was captured (user toggled off too fast, or MediaPipe
+        // never detected anything). Fall back to the default choreography
+        // instead of leaving the avatar frozen on the last live pose.
+        avatarFrameData = avatarOriginalFrameData;
+        avatarFps = avatarOriginalFps;
+        avatarLoopDuration = avatarFrameData.length / Math.max(1, avatarFps);
+        avatarCurrentFrame = avatarOriginalFrameIndex;
+        avatarLoaded = avatarFrameData.length > 0;
+        avatarTimeAccumulator = 0;
+        avatarLastTick = null;
+        replayActive = false;
+        console.log(`[replay] capture too short (${capturedFrames.length} frames), reverted to default choreography`);
       }
 
       // Close the per-visitor capture session: write the final ended_at and
-      // flush any remaining buffered frames to motion_visitors.json. We keep
-      // liveCaptureCurrentSessionId populated until AFTER the flush so the
-      // final write uses the correct session identifier; pushLiveFrame's
+      // flush any remaining buffered frames to motion_visitors.json / IPFS.
+      // We keep liveCaptureCurrentSessionId populated until AFTER the flush
+      // so the final write uses the correct session identifier; pushLiveFrame's
       // `if (!liveMocapActive) return` guard prevents stray frames from
-      // landing on disk after cancelAnimationFrame races.
+      // landing on disk after cancelAnimationFrame races. The pin happens in
+      // the background — the swap above is now instantaneous, so the user
+      // doesn't see a flash of the default choreography anymore.
       if (liveCaptureCurrentSessionId) {
         const closedSessionId = liveCaptureCurrentSessionId;
         const bufferedCount = liveCaptureBuffer.length;
@@ -1327,20 +1377,9 @@ function createAvatarInstance() {
         liveCaptureFinalFlush = false;
         liveCaptureCurrentSessionId = null;
         liveCaptureCurrentSessionStartedAt = null;
-        // After the capture is committed to disk, immediately swap playback to
-        // the freshly captured session. This is the "grabador → reproductor"
-        // loop the user asked for: no page reload required between sessions.
-        if (!replayActive) {
-          enableReplayLastVisitor().catch((e) => console.warn('[replay] auto-enable after capture failed:', e.message));
-        } else {
-          // Replay was already on (showing an earlier visitor); refresh it so
-          // the newest captured session replaces the older playback.
-          disableReplayLastVisitor();
-          enableReplayLastVisitor().catch((e) => console.warn('[replay] refresh after capture failed:', e.message));
-        }
       }
 
-      console.log('[mocap] live tracking stopped, reverted to JSON playback');
+      console.log('[mocap] live tracking stopped');
       window.dispatchEvent(new Event('liveMocap:stopped'));
     }
 
@@ -1357,8 +1396,6 @@ function createAvatarInstance() {
     //  If no archive exists (or the host rejects the read), the toggle
     //  auto-disables and a single info log is emitted.
 
-    let replaySavedFrameData = null;      // snapshot of avatarFrameData before swap
-    let replaySavedCurrentFrame = 0;       // remember playback index to restore
     let replayActive = false;              // true while "Replay Last Visitor" is on
 
     // Manifest stored at IPFS via Pinata — append-only list of session CIDs.
@@ -1395,12 +1432,26 @@ function createAvatarInstance() {
           console.warn('[replay] no visitor sessions yet (start Live Mocap once to record one)');
           return null;
         }
-        const last = sessionRefs[sessionRefs.length - 1];
-        const sessionData = last.cid
-          ? await pinata.fetchJSON(last.cid)
-          : null;
-        if (!sessionData || !Array.isArray(sessionData.frames) || sessionData.frames.length < 4) {
-          console.warn(`[replay] last visitor session ${last.session_id} has no valid frames`);
+        // Walk backwards to find the latest session that has actual frames
+        // (skip empty placeholders that ended up pinned by an aborted flush).
+        // We have to fetch the CID to know the frame count — manifest only
+        // has the reference. Cap the walk at 5 to avoid hammering Pinata when
+        // a user has many short aborted sessions.
+        const maxWalk = 5;
+        let last = null;
+        let sessionData = null;
+        for (let i = sessionRefs.length - 1; i >= Math.max(0, sessionRefs.length - maxWalk); i--) {
+          const ref = sessionRefs[i];
+          if (!ref.cid) continue;
+          const data = await pinata.fetchJSON(ref.cid);
+          if (data && Array.isArray(data.frames) && data.frames.length >= 4) {
+            last = ref;
+            sessionData = data;
+            break;
+          }
+        }
+        if (!last || !sessionData) {
+          console.warn(`[replay] no usable session in last ${maxWalk} captures (all empty or pinned-without-frames)`);
           return null;
         }
         console.log(`[replay] loading last visitor session ${last.session_id} (${sessionData.frames.length} frames, CID=${last.cid.slice(0, 12)}...)`);
@@ -1415,9 +1466,8 @@ function createAvatarInstance() {
       if (replayActive) return true;
       const session = await loadLastVisitorSession();
       if (!session) return false;
-      // Snapshot the original avatarFrameData so disableReplay() restores it.
-      replaySavedFrameData = avatarFrameData;
-      replaySavedCurrentFrame = avatarCurrentFrame;
+      // Swap to the captured session frames. Disable uses avatarOriginalFrameData
+      // to restore the default choreography — no per-call snapshot needed.
       avatarFrameData = session.frames;
       avatarFps = session.fps || avatarFps || 30.0;
       avatarLoopDuration = session.frames.length / Math.max(1, avatarFps);
@@ -1442,13 +1492,17 @@ function createAvatarInstance() {
 
     function disableReplayLastVisitor() {
       if (!replayActive) return;
-      // Restore the original avatarFrameData reference so default choreography
-      // resumes from where it was.
-      if (replaySavedFrameData) {
-        avatarFrameData = replaySavedFrameData;
-        avatarCurrentFrame = replaySavedCurrentFrame;
+      // Restore from the immutable original snapshot captured by loadAvatarMotion.
+      // This works regardless of what state Live Mocap left behind.
+      if (avatarOriginalFrameData) {
+        avatarFrameData = avatarOriginalFrameData;
+        avatarFps = avatarOriginalFps;
+        avatarLoopDuration = avatarFrameData.length / Math.max(1, avatarFps);
+        avatarCurrentFrame = avatarOriginalFrameIndex;
+        avatarLoaded = avatarFrameData.length > 0;
+        avatarTimeAccumulator = 0;
+        avatarLastTick = null;
       }
-      replaySavedFrameData = null;
       replayActive = false;
       // Reset joint state so cached positions don't bleed between choreographies.
       for (const inst of avatarInstances) {
@@ -1474,6 +1528,15 @@ async function loadAvatarMotion(url) {
         avatarLoaded = avatarFrameData.length > 0;
         avatarTimeAccumulator = 0;
         avatarLastTick = null;
+        // Capture an immutable snapshot of the default choreography so both
+        // Replay and Live Mocap can swap avatarFrameData without losing the
+        // reference to the original. Previously each subsystem took its own
+        // snapshot, which meant starting Live Mocap while Replay was active
+        // would save Replay's frames as the "original" and restore those
+        // instead of motion_latest.json on stop.
+        avatarOriginalFrameData = avatarFrameData;
+        avatarOriginalFps = fps;
+        avatarOriginalFrameIndex = avatarCurrentFrame;
         console.log(`[avatars] loaded ${avatarFrameData.length} frames @ ${fps}fps (${avatarLoopDuration.toFixed(2)}s)`);
         if (typeof document !== 'undefined') {
           const info = document.getElementById('info');
@@ -1545,16 +1608,29 @@ async function loadAvatarMotion(url) {
       }
       liveCaptureBuffer.push(frame);
 
-      // Cap the buffer so a static host (which rejects PUTs) doesn't grow
-      // it unbounded. When the cap is hit we drop the oldest frame — newer
-      // motion is more valuable than older.
-      const LIVE_CAPTURE_MAX_BUFFER = LIVE_CAPTURE_FLUSH_FRAMES * 4; // ~4s of motion
+      // Cap the buffer so a runaway session (e.g. user leaves Live Mocap on
+      // for 5 minutes) doesn't OOM the browser. Cap is 5 minutes at 30fps
+      // = 9000 frames, each ~200 bytes ≈ 1.8 MB max. That's a hard ceiling;
+      // most dance sessions are 10–60 seconds = 300–1800 frames.
+      const LIVE_CAPTURE_MAX_BUFFER = 9000;
       while (liveCaptureBuffer.length > LIVE_CAPTURE_MAX_BUFFER) {
         liveCaptureBuffer.shift();
       }
 
-      if (liveCaptureBuffer.length >= LIVE_CAPTURE_FLUSH_FRAMES && !liveCaptureFlushInFlight && !liveCaptureBackoffUntil) {
-        flushLiveCapture().catch((e) => console.warn('[capture] flush error:', e.message));
+      // Auto-flush trigger removed in ce823bb-related fix. The previous
+      // design flushed every 30 frames and replaced the manifest CID each
+      // time, which meant the final Replay only saw the last batch (e.g.
+      // 24 frames out of 300). Now we keep all frames in the live buffer
+      // and pin once on stopLiveMocap. Risk: if the user closes the tab
+      // mid-session we lose the capture — acceptable for an art piece.
+
+      // Keep this debug counter around so we can verify frame counts via
+      // the console if needed.
+      if (typeof window !== 'undefined' && !window.__fallerFrameCounter) {
+        window.__fallerFrameCounter = 0;
+      }
+      if (typeof window !== 'undefined') {
+        window.__fallerFrameCounter++;
       }
     }
 
@@ -1590,9 +1666,16 @@ async function loadAvatarMotion(url) {
         const startedAt = liveCaptureCurrentSessionStartedAt || nowIso;
         const inManifest = manifest.sessions.find((s) => s && s.session_id === sessionId);
         let framesToWrite;
-        if (isFinalFlush && inManifest && Array.isArray(inManifest.frames_in_cid)) {
-          // Re-fetch previous version of this session and concat with new
-          // frames that landed after the last auto-flush.
+        // On the FINAL flush, we want the final session JSON to contain
+        // ALL frames captured during the session — not just the ones still
+        // in the buffer. Each auto-flush during the session pinned the
+        // buffer to a CID and updated the manifest to point to that new CID
+        // (overwriting the previous CID). So to rebuild the full session we
+        // fetch the latest auto-flushed JSON and concatenate whatever's left
+        // in the buffer. Without this concat, a 10s dance captures 300
+        // frames across multiple auto-flushes but the final Replay only sees
+        // the last batch (e.g. 24 frames = 0.8s loop).
+        if (isFinalFlush && inManifest && inManifest.cid) {
           const prev = await pinata.fetchJSON(inManifest.cid);
           const prevFrames = (prev && Array.isArray(prev.frames)) ? prev.frames : [];
           framesToWrite = prevFrames.concat(liveCaptureBuffer);
@@ -1609,6 +1692,12 @@ async function loadAvatarMotion(url) {
         };
         // Pin this session's JSON to IPFS (always — even tiny updates are
         // cheaper than tracking diffs, and Pinata de-dupes by content hash).
+        // Skip empty auto-flushes mid-session (no point pinning 0 frames),
+        // but ALWAYS pin the final flush (it carries ended_at + a sentinel
+        // that the manifest needs to find the session later).
+        if (!liveCaptureFinalFlush && framesToWrite.length === 0) {
+          return;
+        }
         let sessionCid;
         try {
           sessionCid = await pinata.pinJSON(sessionEntry, `faller-session-${sessionId}`);
@@ -2945,6 +3034,7 @@ async function loadAvatarMotion(url) {
           try { await startLiveMocap(); }
           catch (e) {
             // Revert the toggle if camera failed (permission denied, no device).
+            console.error('[mocap] failed to start live tracking:', e.message);
             _syncCtrl(false);
           }
         } else {
@@ -2963,11 +3053,13 @@ async function loadAvatarMotion(url) {
 
       // Replay Last Visitor — auto-activates on page load if motion_visitors.json
       // exists with at least one valid session. No inspector toggle: the
-      // artwork silently switches to the most recent visitor's captured motion
-      // when an archive is available, otherwise it plays the default
-      // choreography. This matches the "found-object sculpture" framing: the
-      // last visitor's gesture replaces the baseline until a newer one arrives.
-      enableReplayLastVisitor().catch((e) => console.warn('[replay] auto-enable failed:', e.message));
+      // NOTE: Replay Last Visitor used to auto-enable here if there was a
+      // previous session in the manifest (localStorage). That made the page
+      // show a frozen replay loop on every reload — visitors couldn't see
+      // the default choreography without manually disabling Replay first.
+      // Removed: Replay now only activates via the Live Mocap → stop flow,
+      // or via a future explicit user toggle. The default choreography in
+      // motion_latest.json is what plays on first load.
 
       window.addEventListener('resize', onWindowResize);
 

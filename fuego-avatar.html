@@ -1307,10 +1307,40 @@ function createAvatarInstance() {
       liveMocapHandsData.left = null;
       liveMocapHandsData.right = null;
 
-      // Restore the original avatarFrameData from the immutable snapshot
-      // captured by loadAvatarMotion. Don't use a per-call snapshot here —
-      // see startLiveMocap for the rationale.
-      if (avatarOriginalFrameData) {
+      // ── Immediate swap to the freshly captured frames ──
+      // We already have the recorded frames in `liveCaptureBuffer` (same shape
+      // as session.frames). Skip the "restore to motion_latest.json then fetch
+      // back from IPFS" roundtrip: that was producing a visible flash of the
+      // default choreography between stop and replay. Instead, swap playback
+      // directly to the captured buffer now, then pin to IPFS in the
+      // background so the session survives across reloads and shows up in
+      // loadLastVisitorSession() for visitors who arrive later.
+      const capturedFrames = liveCaptureBuffer.slice();
+      const capturedFps = avatarFps || 30.0;
+      if (capturedFrames.length >= 4) {
+        // Reset joint state so cached positions from the live pose don't
+        // bleed into the replayed frames.
+        for (const inst of avatarInstances) {
+          if (inst.jointEverSeen) inst.jointEverSeen.fill(false);
+          if (inst.smoothedBasePos) inst.smoothedBasePos.fill(undefined);
+          inst.firePrevPos = null;
+          inst.fireSpeedBuf = null;
+          inst.fireSeeded = false;
+        }
+        avatarFrameData = capturedFrames;
+        avatarFps = capturedFps;
+        avatarLoopDuration = capturedFrames.length / Math.max(1, avatarFps);
+        avatarCurrentFrame = 0;
+        avatarLoaded = true;
+        avatarTimeAccumulator = 0;
+        avatarLastTick = null;
+        replayActive = true;
+        console.log(`[replay] swapped immediately to captured session (${capturedFrames.length} frames @ ${avatarFps}fps)`);
+        window.dispatchEvent(new Event('replayLastVisitor:enabled'));
+      } else if (avatarOriginalFrameData) {
+        // Nothing usable was captured (user toggled off too fast, or MediaPipe
+        // never detected anything). Fall back to the default choreography
+        // instead of leaving the avatar frozen on the last live pose.
         avatarFrameData = avatarOriginalFrameData;
         avatarFps = avatarOriginalFps;
         avatarLoopDuration = avatarFrameData.length / Math.max(1, avatarFps);
@@ -1318,14 +1348,18 @@ function createAvatarInstance() {
         avatarLoaded = avatarFrameData.length > 0;
         avatarTimeAccumulator = 0;
         avatarLastTick = null;
+        replayActive = false;
+        console.log(`[replay] capture too short (${capturedFrames.length} frames), reverted to default choreography`);
       }
 
       // Close the per-visitor capture session: write the final ended_at and
-      // flush any remaining buffered frames to motion_visitors.json. We keep
-      // liveCaptureCurrentSessionId populated until AFTER the flush so the
-      // final write uses the correct session identifier; pushLiveFrame's
+      // flush any remaining buffered frames to motion_visitors.json / IPFS.
+      // We keep liveCaptureCurrentSessionId populated until AFTER the flush
+      // so the final write uses the correct session identifier; pushLiveFrame's
       // `if (!liveMocapActive) return` guard prevents stray frames from
-      // landing on disk after cancelAnimationFrame races.
+      // landing on disk after cancelAnimationFrame races. The pin happens in
+      // the background — the swap above is now instantaneous, so the user
+      // doesn't see a flash of the default choreography anymore.
       if (liveCaptureCurrentSessionId) {
         const closedSessionId = liveCaptureCurrentSessionId;
         const bufferedCount = liveCaptureBuffer.length;
@@ -1343,20 +1377,9 @@ function createAvatarInstance() {
         liveCaptureFinalFlush = false;
         liveCaptureCurrentSessionId = null;
         liveCaptureCurrentSessionStartedAt = null;
-        // After the capture is committed to disk, immediately swap playback to
-        // the freshly captured session. This is the "grabador → reproductor"
-        // loop the user asked for: no page reload required between sessions.
-        if (!replayActive) {
-          enableReplayLastVisitor().catch((e) => console.warn('[replay] auto-enable after capture failed:', e.message));
-        } else {
-          // Replay was already on (showing an earlier visitor); refresh it so
-          // the newest captured session replaces the older playback.
-          disableReplayLastVisitor();
-          enableReplayLastVisitor().catch((e) => console.warn('[replay] refresh after capture failed:', e.message));
-        }
       }
 
-      console.log('[mocap] live tracking stopped, reverted to JSON playback');
+      console.log('[mocap] live tracking stopped');
       window.dispatchEvent(new Event('liveMocap:stopped'));
     }
 
