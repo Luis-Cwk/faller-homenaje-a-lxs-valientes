@@ -38,25 +38,27 @@
     }
 
     /* ── Loading splash (Homenaje a lxs valientes) ──
-       Minimalist cover shown while WebGPU + motion_latest.json + shaders warm up.
-       Dismissed by the first successful renderPipeline.render() call. */
+       Visual identity borrowed from petrasynthetic.com PAGE: white bg,
+       Space Grotesk typography, 3 pulsing black dots. Only copy added is
+       the work title + one short context line about motion capture. */
     #faller-splash {
       position: fixed;
       inset: 0;
       z-index: 9999;
-      background: #000;
+      background: #ffffff;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      color: #f4e6c8;
-      font-family: 'Helvetica Neue', 'Inter', system-ui, -apple-system, sans-serif;
+      font-family: 'Space Grotesk', -apple-system, BlinkMacSystemFont, sans-serif;
+      color: #000000;
       text-align: center;
       padding: 24px;
       box-sizing: border-box;
-      transition: opacity 900ms ease-out, visibility 0s linear 900ms;
+      transition: opacity 0.8s ease, visibility 0s linear 0.8s;
       opacity: 1;
       visibility: visible;
+      -webkit-font-smoothing: antialiased;
       user-select: none;
       -webkit-user-select: none;
     }
@@ -67,76 +69,45 @@
     }
     #faller-splash .splash-title {
       font-size: clamp(22px, 5vw, 38px);
-      letter-spacing: 0.18em;
-      font-weight: 300;
-      text-transform: uppercase;
-      margin: 0 0 6px 0;
-      color: #fff5dc;
-    }
-    #faller-splash .splash-byline {
-      font-size: clamp(11px, 2.4vw, 14px);
-      letter-spacing: 0.42em;
-      font-weight: 400;
-      text-transform: uppercase;
-      color: #c9a76a;
-      margin: 0 0 38px 0;
+      font-weight: 500;
+      letter-spacing: -0.01em;
+      line-height: 1.1;
+      margin: 0 0 14px 0;
+      color: #000000;
     }
     #faller-splash .splash-msg {
-      font-size: clamp(13px, 2.6vw, 16px);
-      letter-spacing: 0.08em;
+      font-size: clamp(13px, 2.4vw, 15px);
       font-weight: 300;
-      line-height: 1.55;
+      letter-spacing: 0.02em;
+      line-height: 1.5;
+      color: rgba(0, 0, 0, 0.6);
       max-width: 480px;
-      color: #d8cdb4;
-      margin: 0 0 44px 0;
+      margin: 0 0 56px 0;
     }
-    #faller-splash .splash-msg strong {
-      color: #f4e6c8;
-      font-weight: 400;
+    #faller-splash .splash-dots {
+      display: flex;
+      gap: 16px;
     }
-    #faller-splash .splash-progress {
-      width: min(220px, 60vw);
-      height: 1px;
-      background: rgba(244, 230, 200, 0.15);
-      position: relative;
-      overflow: hidden;
-      margin-bottom: 18px;
+    #faller-splash .splash-dots span {
+      width: 6px;
+      height: 6px;
+      background: #000000;
+      border-radius: 50%;
+      opacity: 0.2;
+      animation: faller-splash-pulse 2s infinite ease-in-out;
     }
-    #faller-splash .splash-progress::after {
-      content: '';
-      position: absolute;
-      top: 0;
-      left: -40%;
-      width: 40%;
-      height: 100%;
-      background: linear-gradient(90deg, transparent 0%, #f4a261 50%, transparent 100%);
-      animation: faller-splash-scan 1.6s ease-in-out infinite;
+    #faller-splash .splash-dots span:nth-child(2) {
+      animation-delay: 0.3s;
     }
-    @keyframes faller-splash-scan {
-      0%   { left: -40%; }
-      100% { left: 100%; }
+    #faller-splash .splash-dots span:nth-child(3) {
+      animation-delay: 0.6s;
     }
-    #faller-splash .splash-status {
-      font-size: clamp(10px, 2vw, 12px);
-      letter-spacing: 0.32em;
-      text-transform: uppercase;
-      color: #8a7a55;
-      font-weight: 300;
-      min-height: 1em;
-    }
-    #faller-splash .splash-hint {
-      position: absolute;
-      bottom: max(20px, env(safe-area-inset-bottom));
-      left: 0;
-      right: 0;
-      font-size: clamp(9px, 1.8vw, 11px);
-      letter-spacing: 0.28em;
-      text-transform: uppercase;
-      color: #6a5a3a;
-      font-weight: 300;
+    @keyframes faller-splash-pulse {
+      0%, 100% { opacity: 0.2; transform: scale(1); }
+      50%      { opacity: 1;   transform: scale(1.5); }
     }
     @media (prefers-reduced-motion: reduce) {
-      #faller-splash .splash-progress::after { animation: none; left: 0; width: 100%; opacity: 0.6; }
+      #faller-splash .splash-dots span { animation: none; opacity: 0.6; }
     }
   </style>
 </head>
@@ -144,18 +115,13 @@
 <body>
 
   <!-- ── Loading splash (Homenaje a lxs valientes) ──
-       Minimalist cover displayed while WebGPU + motion_latest.json + shaders warm up.
        Dismissed via JS once the first renderPipeline.render() call completes. -->
   <div id="faller-splash" role="status" aria-live="polite" aria-label="Cargando experiencia de captura de movimiento">
     <h1 class="splash-title">Homenaje a lxs valientes</h1>
-    <p class="splash-byline">Petra · 2026</p>
-    <p class="splash-msg">
-      Estás entrando a una <strong>experiencia de captura de movimiento en tiempo real</strong>.
-      Tu cámara corporalizará a lxs danzantes cuando otorgues el permiso.
-    </p>
-    <div class="splash-progress" aria-hidden="true"></div>
-    <p class="splash-status" id="faller-splash-status">Iniciando el fuego…</p>
-    <p class="splash-hint">Por favor, permite el acceso a la cámara cuando se solicite</p>
+    <p class="splash-msg">Experiencia de captura de movimiento en tiempo real</p>
+    <div class="splash-dots" aria-hidden="true">
+      <span></span><span></span><span></span>
+    </div>
   </div>
 
   <!-- Hidden <video> element bound to the webcam stream when live mocap is
@@ -3575,30 +3541,21 @@ async function loadAvatarMotion(url) {
     // to commit it) so the fire is actually painted before we fade out.
     (function dismissSplashWhenReady() {
       const splash = document.getElementById('faller-splash');
-      const status = document.getElementById('faller-splash-status');
       if (!splash) return;
-
-      // Sub-stage status updates so the user knows what's happening
-      setTimeout(() => { if (status && !splash.classList.contains('is-hidden')) status.textContent = 'Compilando shaders…'; }, 350);
-      setTimeout(() => { if (status && !splash.classList.contains('is-hidden')) status.textContent = 'Despertando a lxs danzantes…'; }, 1400);
-      setTimeout(() => { if (status && !splash.classList.contains('is-hidden')) status.textContent = 'Calentando el fuego…'; }, 2800);
 
       let dismissed = false;
       function hide() {
         if (dismissed) return;
         dismissed = true;
         splash.classList.add('is-hidden');
-        if (status) status.textContent = '';
         // Remove from DOM after the CSS fade so it can't intercept events
-        setTimeout(() => splash.remove(), 1100);
+        setTimeout(() => splash.remove(), 1000);
       }
 
       // Hard timeout: never strand the user behind the splash even if WebGPU
       // silently fails. 18s covers the worst-case shader compile + 1.7MB JSON fetch.
       const safetyTimeout = setTimeout(() => {
         console.warn('[faller-splash] Safety timeout reached (18s), forcing dismissal.');
-        if (status) status.textContent = 'Entrando…';
-        // Wait one more frame for the renderer to actually paint before we hide
         requestAnimationFrame(() => requestAnimationFrame(hide));
       }, 18000);
 
