@@ -36,10 +36,127 @@
       top: 0;
       left: 0;
     }
+
+    /* ── Loading splash (Homenaje a lxs valientes) ──
+       Minimalist cover shown while WebGPU + motion_latest.json + shaders warm up.
+       Dismissed by the first successful renderPipeline.render() call. */
+    #faller-splash {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      background: #000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: #f4e6c8;
+      font-family: 'Helvetica Neue', 'Inter', system-ui, -apple-system, sans-serif;
+      text-align: center;
+      padding: 24px;
+      box-sizing: border-box;
+      transition: opacity 900ms ease-out, visibility 0s linear 900ms;
+      opacity: 1;
+      visibility: visible;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    #faller-splash.is-hidden {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+    #faller-splash .splash-title {
+      font-size: clamp(22px, 5vw, 38px);
+      letter-spacing: 0.18em;
+      font-weight: 300;
+      text-transform: uppercase;
+      margin: 0 0 6px 0;
+      color: #fff5dc;
+    }
+    #faller-splash .splash-byline {
+      font-size: clamp(11px, 2.4vw, 14px);
+      letter-spacing: 0.42em;
+      font-weight: 400;
+      text-transform: uppercase;
+      color: #c9a76a;
+      margin: 0 0 38px 0;
+    }
+    #faller-splash .splash-msg {
+      font-size: clamp(13px, 2.6vw, 16px);
+      letter-spacing: 0.08em;
+      font-weight: 300;
+      line-height: 1.55;
+      max-width: 480px;
+      color: #d8cdb4;
+      margin: 0 0 44px 0;
+    }
+    #faller-splash .splash-msg strong {
+      color: #f4e6c8;
+      font-weight: 400;
+    }
+    #faller-splash .splash-progress {
+      width: min(220px, 60vw);
+      height: 1px;
+      background: rgba(244, 230, 200, 0.15);
+      position: relative;
+      overflow: hidden;
+      margin-bottom: 18px;
+    }
+    #faller-splash .splash-progress::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: -40%;
+      width: 40%;
+      height: 100%;
+      background: linear-gradient(90deg, transparent 0%, #f4a261 50%, transparent 100%);
+      animation: faller-splash-scan 1.6s ease-in-out infinite;
+    }
+    @keyframes faller-splash-scan {
+      0%   { left: -40%; }
+      100% { left: 100%; }
+    }
+    #faller-splash .splash-status {
+      font-size: clamp(10px, 2vw, 12px);
+      letter-spacing: 0.32em;
+      text-transform: uppercase;
+      color: #8a7a55;
+      font-weight: 300;
+      min-height: 1em;
+    }
+    #faller-splash .splash-hint {
+      position: absolute;
+      bottom: max(20px, env(safe-area-inset-bottom));
+      left: 0;
+      right: 0;
+      font-size: clamp(9px, 1.8vw, 11px);
+      letter-spacing: 0.28em;
+      text-transform: uppercase;
+      color: #6a5a3a;
+      font-weight: 300;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      #faller-splash .splash-progress::after { animation: none; left: 0; width: 100%; opacity: 0.6; }
+    }
   </style>
 </head>
 
 <body>
+
+  <!-- ── Loading splash (Homenaje a lxs valientes) ──
+       Minimalist cover displayed while WebGPU + motion_latest.json + shaders warm up.
+       Dismissed via JS once the first renderPipeline.render() call completes. -->
+  <div id="faller-splash" role="status" aria-live="polite" aria-label="Cargando experiencia de captura de movimiento">
+    <h1 class="splash-title">Homenaje a lxs valientes</h1>
+    <p class="splash-byline">Petra · 2026</p>
+    <p class="splash-msg">
+      Estás entrando a una <strong>experiencia de captura de movimiento en tiempo real</strong>.
+      Tu cámara corporalizará a lxs danzantes cuando otorgues el permiso.
+    </p>
+    <div class="splash-progress" aria-hidden="true"></div>
+    <p class="splash-status" id="faller-splash-status">Iniciando el fuego…</p>
+    <p class="splash-hint">Por favor, permite el acceso a la cámara cuando se solicite</p>
+  </div>
 
   <!-- Hidden <video> element bound to the webcam stream when live mocap is
        active. The toggle itself lives in the Inspector's "Live Mocap"
@@ -3451,6 +3568,50 @@ async function loadAvatarMotion(url) {
 
     // Kick everything off now that every `let`/`const` in this module is initialised.
     init();
+
+    // ── Splash dismissal ──
+    // The splash stays visible until the first renderPipeline.render() has produced
+    // a real frame. We wait two rAFs (one for the WebGPU render, one for the browser
+    // to commit it) so the fire is actually painted before we fade out.
+    (function dismissSplashWhenReady() {
+      const splash = document.getElementById('faller-splash');
+      const status = document.getElementById('faller-splash-status');
+      if (!splash) return;
+
+      // Sub-stage status updates so the user knows what's happening
+      setTimeout(() => { if (status && !splash.classList.contains('is-hidden')) status.textContent = 'Compilando shaders…'; }, 350);
+      setTimeout(() => { if (status && !splash.classList.contains('is-hidden')) status.textContent = 'Despertando a lxs danzantes…'; }, 1400);
+      setTimeout(() => { if (status && !splash.classList.contains('is-hidden')) status.textContent = 'Calentando el fuego…'; }, 2800);
+
+      let dismissed = false;
+      function hide() {
+        if (dismissed) return;
+        dismissed = true;
+        splash.classList.add('is-hidden');
+        if (status) status.textContent = '';
+        // Remove from DOM after the CSS fade so it can't intercept events
+        setTimeout(() => splash.remove(), 1100);
+      }
+
+      // Hard timeout: never strand the user behind the splash even if WebGPU
+      // silently fails. 18s covers the worst-case shader compile + 1.7MB JSON fetch.
+      const safetyTimeout = setTimeout(() => {
+        console.warn('[faller-splash] Safety timeout reached (18s), forcing dismissal.');
+        if (status) status.textContent = 'Entrando…';
+        // Wait one more frame for the renderer to actually paint before we hide
+        requestAnimationFrame(() => requestAnimationFrame(hide));
+      }, 18000);
+
+      // Wait for the first WebGPU render to complete.
+      // renderPipeline.render() is synchronous, so the very next rAF after init()
+      // is the first frame the browser can composite.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          clearTimeout(safetyTimeout);
+          hide();
+        });
+      });
+    })();
 
   </script>
 
